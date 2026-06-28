@@ -27,7 +27,9 @@ extern "C" {
 #endif
 
 #include "block/snapshot.h"
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <epoxy/gl.h>
+#endif
 
 #define XEMU_SNAPSHOT_DATA_MAGIC 0x78656d75 // 'xemu'
 #define XEMU_SNAPSHOT_DATA_VERSION 1
@@ -40,7 +42,11 @@ extern const char **g_snapshot_shortcut_index_key_map[];
 typedef struct XemuSnapshotData {
     char *disc_path;
     char *xbe_title_name;
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    unsigned int gl_thumbnail;
+#else
     GLuint gl_thumbnail;
+#endif
 } XemuSnapshotData;
 
 // Implemented in xemu-snapshots.c
@@ -56,9 +62,11 @@ bool xemu_snapshots_offset_extra_data(QEMUFile *f);
 void xemu_snapshots_mark_dirty(void);
 
 // Implemented in xemu-thumbnail.cc
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 void xemu_snapshots_set_framebuffer_texture(GLuint tex, bool flip);
 bool xemu_snapshots_load_png_to_texture(GLuint tex, void *buf, size_t size);
 void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size);
+#endif
 
 #ifdef __cplusplus
 }

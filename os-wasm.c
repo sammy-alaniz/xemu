@@ -37,6 +37,12 @@
 #include "system/runstate.h"
 #include "qemu/cutils.h"
 
+int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize,
+                           cpu_set_t *cpuset)
+{
+    return ENOSYS;
+}
+
 void os_setup_post(void){}
 void os_set_line_buffering(void)
 {

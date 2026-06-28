@@ -1167,7 +1167,7 @@ static inline bool nonempty_str(const char *str)
 static int parse_fw_cfg(void *opaque, QemuOpts *opts, Error **errp)
 {
     gchar *buf;
-    size_t size;
+    gsize size;
     const char *name, *file, *str, *gen_id;
     FWCfgState *fw_cfg = (FWCfgState *) opaque;
 
@@ -2534,6 +2534,15 @@ static int xemu_check_file(const char *path)
     return 0;
 }
 
+static bool xemu_is_browser_block_path(const char *path)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    return g_str_has_prefix(path, "/xemu-browser-block/");
+#else
+    return false;
+#endif
+}
+
 // Duplicate commas to escape them
 static char *strdup_double_commas(const char *input) {
     size_t length = 0;
@@ -2958,6 +2967,13 @@ void qemu_init(int argc, char **argv)
     MachineClass *machine_class;
     bool userconfig = true;
     FILE *vmstate_dump_file = NULL;
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    bool headless_boot = true;
+#else
+    const char *headless_boot_env = getenv("XEMU_HEADLESS_BOOT");
+    bool headless_boot = headless_boot_env && headless_boot_env[0] &&
+                         strcmp(headless_boot_env, "0");
+#endif
 
 /*****************************************************************************/
 
@@ -3039,7 +3055,7 @@ void qemu_init(int argc, char **argv)
     }
 
     const char *flashrom_path = g_config.sys.files.flashrom_path;
-    if (g_config.general.show_welcome) {
+    if (g_config.general.show_welcome && !headless_boot) {
         // Don't display an error if this is the first boot. Give user a chance
         // to configure the path.
         autostart = 0;
@@ -3059,15 +3075,17 @@ void qemu_init(int argc, char **argv)
 
     const char *hdd_path = g_config.sys.files.hdd_path;
     if (strlen(hdd_path) > 0) {
-        if (xemu_check_file(hdd_path)) {
+        if (!xemu_is_browser_block_path(hdd_path) && xemu_check_file(hdd_path)) {
             char *msg = g_strdup_printf("Failed to open hard disk image file '%s'. Please check machine settings.", hdd_path);
             xemu_queue_error_message(msg);
             g_free(msg);
         } else {
             fake_argv[fake_argc++] = strdup("-drive");
             char *escaped_hdd_path = strdup_double_commas(hdd_path);
-            fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s",
+            const char *raw_format = xemu_is_browser_block_path(hdd_path) ? ",format=raw" : "";
+            fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s%s",
                 escaped_hdd_path,
+                raw_format,
                 strlen(escaped_hdd_path) > 0 ? ",locked=on" : "");
             free(escaped_hdd_path);
         }
@@ -3095,7 +3113,12 @@ void qemu_init(int argc, char **argv)
     free(escaped_dvd_path);
 
     fake_argv[fake_argc++] = strdup("-display");
-    fake_argv[fake_argc++] = strdup("xemu");
+    fake_argv[fake_argc++] = strdup(headless_boot ? "none" : "xemu");
+
+    if (headless_boot) {
+        fake_argv[fake_argc++] = strdup("-audio");
+        fake_argv[fake_argc++] = strdup("none");
+    }
 
     // Create USB Daughterboard for 1.0 Xbox. This is connected to Port 1 of the Root hub.
     fake_argv[fake_argc++] = strdup("-device");

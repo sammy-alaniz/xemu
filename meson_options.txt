@@ -212,6 +212,10 @@ option('rbd', type : 'feature', value : 'auto',
        description: 'Ceph block device driver')
 option('opengl', type : 'feature', value : 'enabled',
        description: 'OpenGL support')
+option('vulkan', type : 'feature', value : 'auto',
+       description: 'Vulkan support')
+option('xemu_browser_boot', type : 'boolean', value : false,
+       description: 'Build a reduced Xbox browser boot profile with desktop renderers disabled')
 option('rdma', type : 'feature', value : 'auto',
        description: 'Enable RDMA-based migration')
 option('gtk', type : 'feature', value : 'auto',

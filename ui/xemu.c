@@ -1199,15 +1199,35 @@ type_init(register_xemu_display);
 int gArgc;
 char **gArgv;
 
+static bool xemu_headless_boot_enabled(void);
+
+static bool xemu_boot_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+}
+
+static void xemu_boot_trace_mark(const char *message)
+{
+    if (xemu_boot_trace_enabled()) {
+        fprintf(stderr, "BOOT_MARK %s\n", message);
+    }
+}
+
 static void *qemu_main(void *opaque)
 {
+    xemu_boot_trace_mark("b0 thread=qemu-main started");
     qemu_init(gArgc, gArgv);
     exit_status = qemu_main_loop();
     qatomic_set(&qemu_exiting, true);
     bql_unlock();
     qemu_mutex_unlock_main_loop();
 
-    qemu_sem_wait(&display_shutdown_sem);
+    if (!xemu_headless_boot_enabled()) {
+        qemu_sem_wait(&display_shutdown_sem);
+    }
+
     bql_lock();
     qemu_cleanup(exit_status);
     bql_unlock();
@@ -1272,9 +1292,38 @@ static void init_sdl_app_metadata(void)
                                "https://xemu.app");
 }
 
+static bool xemu_headless_boot_enabled(void)
+{
+    const char *value = getenv("XEMU_HEADLESS_BOOT");
+
+    return value && value[0] && strcmp(value, "0");
+}
+
+static int64_t xemu_headless_boot_timeout_ms(void)
+{
+    const char *value = getenv("XEMU_HEADLESS_BOOT_MS");
+    char *end = NULL;
+    int64_t timeout_ms = 30000;
+
+    if (!value || !value[0]) {
+        return timeout_ms;
+    }
+
+    timeout_ms = g_ascii_strtoll(value, &end, 10);
+    if (end == value || timeout_ms < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_HEADLESS_BOOT_MS='%s'; using 30000 ms\n",
+                value);
+        return 30000;
+    }
+
+    return timeout_ms;
+}
+
 int main(int argc, char **argv)
 {
     QemuThread thread;
+    bool headless_boot = xemu_headless_boot_enabled();
 
     setlocale(LC_NUMERIC, "C");
 
@@ -1306,7 +1355,9 @@ int main(int argc, char **argv)
     fprintf(stderr, "xemu_commit: %s\n", xemu_commit);
     fprintf(stderr, "xemu_date: %s\n", xemu_date);
 
-    init_sdl_app_metadata();
+    if (!headless_boot) {
+        init_sdl_app_metadata();
+    }
 
     gArgc = argc;
     gArgv = argv;
@@ -1325,26 +1376,65 @@ int main(int argc, char **argv)
     if (!xemu_settings_load()) {
         const char *err_msg = xemu_settings_get_error_message();
         fprintf(stderr, "%s", err_msg);
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-            "Failed to load xemu config file", err_msg,
-            m_window);
-        SDL_Quit();
+        if (!headless_boot) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                "Failed to load xemu config file", err_msg,
+                m_window);
+            SDL_Quit();
+        }
         exit(1);
     }
-    atexit(xemu_settings_save);
+
+    if (headless_boot) {
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_NULL;
+        g_config.general.updates.check = false;
+        g_config.general.show_welcome = false;
+    } else {
+        atexit(xemu_settings_save);
+    }
 
 #ifdef _WIN32
-    if (g_config.display.setup_nvidia_profile) {
+    if (!headless_boot && g_config.display.setup_nvidia_profile) {
         setup_nvidia_profile();
     }
 #endif
 
-    display_very_early_init(NULL);
+    if (!headless_boot) {
+        display_very_early_init(NULL);
+    }
 
     qemu_sem_init(&display_init_sem, 0);
     qemu_sem_init(&display_shutdown_sem, 0);
     qemu_thread_create(&thread, "qemu_main", qemu_main,
                        NULL, QEMU_THREAD_JOINABLE);
+    xemu_boot_trace_mark("b0 thread=qemu-main created");
+
+    if (headless_boot) {
+        int64_t timeout_ms = xemu_headless_boot_timeout_ms();
+        int64_t start_us = g_get_monotonic_time();
+        const char *reason = "shutdown";
+
+        while (!qatomic_read(&qemu_exiting)) {
+            int64_t elapsed_ms = (g_get_monotonic_time() - start_us) / 1000;
+
+            if (timeout_ms > 0 && elapsed_ms >= timeout_ms) {
+                reason = "timeout";
+                qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
+                break;
+            }
+
+            g_usleep(50000);
+        }
+
+        qemu_thread_join(&thread);
+        fprintf(stderr,
+                "BOOT_SMOKE_RESULT reason=%s elapsed_ms=%lld exit=%d\n",
+                reason,
+                (long long)((g_get_monotonic_time() - start_us) / 1000),
+                exit_status);
+        return exit_status;
+    }
+
     qemu_sem_wait(&display_init_sem);
 
     gui_grab = 0;

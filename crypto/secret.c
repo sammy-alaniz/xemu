@@ -33,7 +33,7 @@ qcrypto_secret_load_data(QCryptoSecretCommon *sec_common,
                          Error **errp)
 {
     char *data = NULL;
-    size_t length = 0;
+    gsize length = 0;
     GError *gerr = NULL;
 
     QCryptoSecret *secret = QCRYPTO_SECRET(sec_common);

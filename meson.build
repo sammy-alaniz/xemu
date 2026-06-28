@@ -1302,7 +1302,9 @@ else
 endif
 
 slirp = not_found
-if not get_option('slirp').auto() or have_system
+if get_option('xemu_browser_boot')
+  slirp = not_found
+elif not get_option('slirp').auto() or have_system
   slirp = dependency('slirp', required: get_option('slirp'),
                      method: 'pkg-config')
   # slirp < 4.7 is incompatible with CFI support in QEMU.  This is because
@@ -1459,10 +1461,13 @@ if not get_option('blkio').auto() or have_block
                      method: 'pkg-config',
                      required: get_option('blkio'))
 endif
-curl = dependency('libcurl', version: '>=7.29.0',
-                  method: 'pkg-config',
-                  required: false)
-if not curl.found()
+curl = not_found
+if not get_option('curl').disabled()
+  curl = dependency('libcurl', version: '>=7.29.0',
+                    method: 'pkg-config',
+                    required: get_option('curl'))
+endif
+if not curl.found() and not get_option('curl').disabled()
   if host_os == 'windows'
     curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
   elif host_os == 'darwin'
@@ -1672,7 +1677,9 @@ if not get_option('brlapi').auto() or have_system
 endif
 
 sdl = not_found
-if not get_option('sdl').auto() or have_system
+if get_option('xemu_browser_boot')
+  sdl = not_found
+elif not get_option('sdl').auto() or have_system
   sdl = dependency('sdl3', required: false, allow_fallback: false)
   if not sdl.found() and not get_option('sdl').disabled()
     sdl3_cmake_opts = cmake.subproject_options()
@@ -1882,10 +1889,13 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
                          required: get_option('coreaudio'))
 endif
 
-epoxy = dependency('epoxy', required: true)
-
+epoxy = not_found
 opengl = not_found
-if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
+if get_option('xemu_browser_boot')
+  opengl = not_found
+elif not get_option('opengl').auto() or have_system or have_vhost_user_gpu
+  epoxy = dependency('epoxy', required: true)
+
   # FIXME: Use meson's 'gl' dep
   if host_os == 'darwin'
     opengl_libs=['-framework', 'OpenGL']
@@ -2387,10 +2397,12 @@ endif
 vulkan = not_found
 libglslang = not_found
 
-if host_os == 'windows'
+if get_option('vulkan').disabled()
+  vulkan = not_found
+elif host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
 elif host_os == 'linux'
-  vulkan = dependency('vulkan')
+  vulkan = dependency('vulkan', required: get_option('vulkan'))
 endif
 
 if vulkan.found()
@@ -2428,40 +2440,48 @@ if vulkan.found()
                                      dependencies: vulkan)
 endif
 
-if host_os == 'windows'
+libpcap = not_found
+if get_option('xemu_browser_boot')
+  libpcap = not_found
+elif host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
 else
   libpcap = dependency('libpcap', method: 'pkg-config', required: true)
 endif
 
-libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+libsamplerate = not_found
+if not get_option('xemu_browser_boot')
+  libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+endif
 
-imgui_proj = subproject('imgui', required: true,
-                         default_options: [
-                           'default_library=static',
-                           'dx9=disabled',
-                           'dx10=disabled',
-                           'dx11=disabled',
-                           'dx12=disabled',
-                           'metal=disabled',
-                           'opengl=enabled',
-                           'sdl2_renderer=disabled',
-                           'sdl3_renderer=disabled',
-                           'vulkan=disabled',
-                           'webgpu=disabled',
-                           'glfw=disabled',
-                           'sdl2=disabled',
-                           'sdl3=enabled',
-                           'osx=disabled',
-                           'win=disabled',
-                           'allegro5=disabled',
-                        ])
-imgui = imgui_proj.get_variable('imgui_dep')
+if not get_option('xemu_browser_boot')
+  imgui_proj = subproject('imgui', required: true,
+                          default_options: [
+                            'default_library=static',
+                            'dx9=disabled',
+                            'dx10=disabled',
+                            'dx11=disabled',
+                            'dx12=disabled',
+                            'metal=disabled',
+                            'opengl=enabled',
+                            'sdl2_renderer=disabled',
+                            'sdl3_renderer=disabled',
+                            'vulkan=disabled',
+                            'webgpu=disabled',
+                            'glfw=disabled',
+                            'sdl2=disabled',
+                            'sdl3=enabled',
+                            'osx=disabled',
+                            'win=disabled',
+                            'allegro5=disabled',
+                          ])
+  imgui = imgui_proj.get_variable('imgui_dep')
 
-implot_proj = subproject('implot', required: true,
-                         default_options: ['default_library=static'])
-implot = implot_proj.get_variable('implot_dep')
+  implot_proj = subproject('implot', required: true,
+                           default_options: ['default_library=static'])
+  implot = implot_proj.get_variable('implot_dep')
+endif
 
 genconfig_proj = subproject('genconfig', required: true)
 genconfig = genconfig_proj.get_variable('cnode_dep')
@@ -2698,6 +2718,7 @@ if numa.found()
 endif
 config_host_data.set('CONFIG_OPENGL', opengl.found())
 config_host_data.set('CONFIG_VULKAN', vulkan.found())
+config_host_data.set('CONFIG_XEMU_BROWSER_BOOT', get_option('xemu_browser_boot'))
 config_host_data.set('CONFIG_PLUGIN', get_option('plugins'))
 config_host_data.set('CONFIG_RBD', rbd.found())
 config_host_data.set('CONFIG_RDMA', rdma.found())
@@ -2712,6 +2733,7 @@ endif
 config_host_data.set('CONFIG_PIXMAN', pixman.found())
 config_host_data.set('CONFIG_PASST', enable_passt)
 config_host_data.set('CONFIG_SLIRP', slirp.found())
+config_host_data.set('CONFIG_PCAP', libpcap.found())
 config_host_data.set('CONFIG_SNAPPY', snappy.found())
 config_host_data.set('CONFIG_SOLARIS', host_os == 'sunos')
 if have_tcg
@@ -3084,7 +3106,7 @@ config_host_data.set('CONFIG_PTHREAD_CONDATTR_SETCLOCK', cc.links(osdep_prefix +
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     return 0;
   }''', dependencies: threads))
-config_host_data.set('CONFIG_PTHREAD_AFFINITY_NP', cc.links(osdep_prefix + '''
+config_host_data.set('CONFIG_PTHREAD_AFFINITY_NP', host_os != 'emscripten' and cc.links(osdep_prefix + '''
   #include <pthread.h>
 
   static void *f(void *p) { return NULL; }
@@ -3892,8 +3914,12 @@ if have_system
     'hw/remote',
     'hw/xbox/nv2a',
     'hw/xbox/mcpx/apu',
-    'hw/xbox/mcpx/apu/dsp',
     'hw/xbox/mcpx/nvnet',
+  ]
+endif
+if not get_option('xemu_browser_boot')
+  trace_events_subdirs += [
+    'hw/xbox/mcpx/apu/dsp',
   ]
 endif
 if have_system or have_user
@@ -4045,7 +4071,7 @@ if have_block
   if host_os == 'windows'
     system_ss.add(files('os-win32.c'))
   elif host_os == 'emscripten'
-    blockdev_ss.add(files('os-wasm.c'))
+    system_ss.add(files('os-wasm.c'))
   else
     blockdev_ss.add(files('os-posix.c'))
   endif
@@ -4615,17 +4641,21 @@ foreach target : target_dirs
                  build_by_default: false)
 
   if target.endswith('-softmmu')
+    qemu_system_sources = files('system/main.c')
+    if get_option('xemu_browser_boot')
+      qemu_system_sources = []
+    endif
     execs = [{
       'name': 'qemu-system-' + target_name,
       'win_subsystem': 'console',
-      'sources': files('system/main.c'),
+      'sources': qemu_system_sources,
       'dependencies': [sdl]
     }]
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
         'name': 'qemu-system-' + target_name + 'w',
         'win_subsystem': 'windows',
-        'sources': files('system/main.c'),
+        'sources': qemu_system_sources,
         'dependencies': [sdl]
       }]
     endif

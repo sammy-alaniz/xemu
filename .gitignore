@@ -1,5 +1,11 @@
 /GNUmakefile
 /build/
+/build-browser-probe/
+/build-docker/
+/build-wasm/
+/build-wasm-sysroot/
+/fixtures/
+/xemu-fixtures/
 /.cache/
 /.vscode/
 *.pyc

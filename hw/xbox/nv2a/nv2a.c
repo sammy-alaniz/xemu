@@ -22,6 +22,24 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/main-loop.h"
 
+static bool nv2a_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static void nv2a_boot_trace_mark(const char *message)
+{
+    if (nv2a_boot_trace_enabled()) {
+        fprintf(stderr, "BOOT_MARK %s\n", message);
+    }
+}
+
 void nv2a_update_irq(NV2AState *d)
 {
     /* PFIFO */
@@ -237,6 +255,7 @@ static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)
     /* fire up pfifo */
     qemu_thread_create(&d->pfifo.thread, "nv2a.pfifo_thread",
                        pfifo_thread, d, QEMU_THREAD_JOINABLE);
+    nv2a_boot_trace_mark("b2 thread=nv2a-pfifo created");
 }
 
 static void nv2a_init_vga(NV2AState *d)

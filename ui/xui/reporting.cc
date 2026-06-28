@@ -29,7 +29,9 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
+#ifdef CONFIG_CURL
 static const char *compat_report_endpoint_url = "https://reports.xemu.app/compatibility";
+#endif
 
 CompatibilityReport::CompatibilityReport()
 {
@@ -66,6 +68,7 @@ bool CompatibilityReport::Send()
 {
 	const std::string &s = GetSerializedReport();
 
+#ifdef CONFIG_CURL
 	int res = http_post_json(compat_report_endpoint_url, s.c_str(), NULL);
 	if (res < 0) {
 		result_code = -1;
@@ -94,6 +97,12 @@ bool CompatibilityReport::Send()
 		result_msg = "Unknown error occurred";
 		return false;
 	}
+#else
+	(void)s;
+	result_code = -1;
+	result_msg = "Reporting unavailable in this build";
+	return false;
+#endif
 }
 
 void CompatibilityReport::SetXbeData(struct xbe *xbe)

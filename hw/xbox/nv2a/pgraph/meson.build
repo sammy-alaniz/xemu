@@ -12,7 +12,13 @@ if have_renderdoc
 endif
 subdir('thirdparty')
 subdir('null')
-subdir('gl')
-subdir('glsl')
-subdir('vk')
+if not get_option('xemu_browser_boot')
+  subdir('gl')
+endif
+if not get_option('xemu_browser_boot')
+  subdir('glsl')
+endif
+if not get_option('xemu_browser_boot')
+  subdir('vk')
+endif
 specific_ss.add(nv2a_vsh_cpu)

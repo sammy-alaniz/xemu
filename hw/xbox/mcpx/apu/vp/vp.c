@@ -22,6 +22,24 @@
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "adpcm.h"
 
+static bool voice_work_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static void voice_work_boot_trace_mark(const char *message)
+{
+    if (voice_work_boot_trace_enabled()) {
+        fprintf(stderr, "BOOT_MARK %s\n", message);
+    }
+}
+
 static const struct {
     hwaddr top, current, next;
 } voice_list_regs[] = {
@@ -56,9 +74,11 @@ static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
     assert(v < MCPX_HW_MAX_VOICES);
     memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
     hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     if (d->vp.filters[v].resampler) {
         src_reset(d->vp.filters[v].resampler);
     }
+#endif
 }
 
 static bool voice_should_mute(uint16_t v)
@@ -149,9 +169,18 @@ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
 
 static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
 {
+    bool locked;
+
     assert(v < MCPX_HW_MAX_VOICES);
     uint64_t mask = 1LL << (v % 64);
-    return (qatomic_read(&d->vp.voice_locked[v / 64]) & mask) != 0;
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    qemu_mutex_lock(&d->lock);
+    locked = (d->vp.voice_locked[v / 64] & mask) != 0;
+    qemu_mutex_unlock(&d->lock);
+#else
+    locked = (qatomic_read(&d->vp.voice_locked[v / 64]) & mask) != 0;
+#endif
+    return locked;
 }
 
 static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
@@ -1120,6 +1149,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
     return sample_count;
 }
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 static long voice_resample_callback(void *cb_data, float **data)
 {
     MCPXAPUVoiceFilter *filter = cb_data;
@@ -1145,19 +1175,24 @@ static long voice_resample_callback(void *cb_data, float **data)
 
     if (sample_count < NUM_SAMPLES_PER_FRAME) {
         /* Starvation causes SRC hang on repeated calls. Provide silence. */
-        memset(&filter->resample_buf[2*sample_count], 0,
-            2*(NUM_SAMPLES_PER_FRAME-sample_count)*sizeof(float));
+        memset(&filter->resample_buf[2 * sample_count], 0,
+            2 * (NUM_SAMPLES_PER_FRAME - sample_count) * sizeof(float));
         sample_count = NUM_SAMPLES_PER_FRAME;
     }
 
     *data = filter->resample_buf;
     return sample_count;
 }
+#endif
 
 static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                           int requested_num, float rate)
 {
     assert(v < MCPX_HW_MAX_VOICES);
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    (void)rate;
+    return voice_get_samples(d, v, samples, requested_num);
+#else
     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
 
     if (filter->resampler == NULL) {
@@ -1191,6 +1226,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
     }
 
     return count;
+#endif
 }
 
 static int peek_ahead_multipass_bin(MCPXAPUState *d, uint16_t v,
@@ -1586,11 +1622,15 @@ static void *voice_worker_thread(void *arg)
 {
     MCPXAPUState *d = arg;
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
+    char marker[64];
 
     rcu_register_thread();
     qemu_mutex_lock(&vwd->lock);
 
     int worker_id = ctz64(vwd->workers_pending);
+    snprintf(marker, sizeof(marker), "b2 thread=mcpx-voice-worker started id=%d",
+             worker_id);
+    voice_work_boot_trace_mark(marker);
     VoiceWorker *self = &d->vp.voice_work_dispatch.workers[worker_id];
     self->queue_len = 0;
 
@@ -1768,7 +1808,7 @@ static void voice_work_init(MCPXAPUState *d)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
-    int num_workers = g_config.audio.vp.num_workers ?: SDL_GetNumLogicalCPUCores();
+    int num_workers = g_config.audio.vp.num_workers ?: g_get_num_processors();
     vwd->num_workers = MAX(1, MIN(num_workers, MAX_VOICE_WORKERS));
     vwd->workers = g_malloc0_n(vwd->num_workers, sizeof(VoiceWorker));
     vwd->workers_should_exit = false;
@@ -1782,9 +1822,14 @@ static void voice_work_init(MCPXAPUState *d)
     qemu_cond_init(&vwd->work_pending);
     qemu_cond_init(&vwd->work_finished);
     for (int i = 0; i < vwd->num_workers; i++) {
+        char marker[64];
+
         vwd->workers_pending |= 1 << i;
         qemu_thread_create(&vwd->workers[i].thread, "mcpx.voice_worker",
                            voice_worker_thread, d, QEMU_THREAD_JOINABLE);
+        snprintf(marker, sizeof(marker),
+                 "b2 thread=mcpx-voice-worker created id=%d", i);
+        voice_work_boot_trace_mark(marker);
     }
     qemu_cond_wait(&vwd->work_finished, &vwd->lock);
     assert(!vwd->workers_pending);
@@ -1844,8 +1889,15 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
         /* Mix all voices together to hear any audible voice */
         int16_t isamp[NUM_SAMPLES_PER_FRAME * 2];
+#ifndef CONFIG_XEMU_BROWSER_BOOT
         src_float_to_short_array((float *)d->vp.sample_buf, isamp,
                                  NUM_SAMPLES_PER_FRAME * 2);
+#else
+        for (int i = 0; i < NUM_SAMPLES_PER_FRAME * 2; i++) {
+            isamp[i] = clampf(((float *)d->vp.sample_buf)[i],
+                              -1.0f, 1.0f) * INT16_MAX;
+        }
+#endif
         int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             d->monitor.frame_buf[off + i][0] += isamp[2*i];

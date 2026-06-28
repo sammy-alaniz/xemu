@@ -25,12 +25,14 @@
 #ifndef XEMU_INPUT_H
 #define XEMU_INPUT_H
 
-#include <SDL3/SDL.h>
 #include <stdbool.h>
 
 #include "qemu/queue.h"
 #include "xemu-settings.h"
+
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <SDL3/SDL.h>
+#endif
 
 #define DRIVER_DUKE "usb-xbox-gamepad"
 #define DRIVER_S "usb-xbox-gamepad-s"
@@ -69,8 +71,11 @@ enum controller_state_axis_index {
 };
 
 enum controller_input_device_type {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     INPUT_DEVICE_SDL_KEYBOARD,
     INPUT_DEVICE_SDL_GAMEPAD,
+#endif
+    INPUT_DEVICE_NONE,
 };
 
 enum peripheral_type { PERIPHERAL_NONE, PERIPHERAL_XMU, PERIPHERAL_TYPE_COUNT };
@@ -99,10 +104,12 @@ typedef struct ControllerState {
 
     enum controller_input_device_type type;
     const char         *name;
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     SDL_Gamepad        *sdl_gamepad; // if type == INPUT_DEVICE_SDL_GAMEPAD
     SDL_Joystick       *sdl_joystick;
     SDL_JoystickID      sdl_joystick_id;
     SDL_GUID            sdl_joystick_guid;
+#endif
 
     enum peripheral_type peripheral_types[2];
     void *peripherals[2];
@@ -125,11 +132,15 @@ extern "C" {
 extern int *g_keyboard_scancode_map[25];
 
 void xemu_input_init(void);
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 void xemu_input_process_sdl_events(const SDL_Event *event); // SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED
+#endif
 void xemu_input_update_controllers(void);
 void xemu_input_update_controller(ControllerState *state);
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 void xemu_input_update_sdl_kbd_controller_state(ControllerState *state);
 void xemu_input_update_sdl_controller_state(ControllerState *state);
+#endif
 void xemu_input_update_rumble(ControllerState *state);
 ControllerState *xemu_input_get_bound(int index);
 void xemu_input_bind(int index, ControllerState *state, int save);

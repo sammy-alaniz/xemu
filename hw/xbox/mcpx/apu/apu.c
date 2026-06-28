@@ -23,6 +23,24 @@
 
 MCPXAPUState *g_state; // Used via debug handlers
 
+static bool mcpx_apu_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static void mcpx_apu_boot_trace_mark(const char *message)
+{
+    if (mcpx_apu_boot_trace_enabled()) {
+        fprintf(stderr, "BOOT_MARK %s\n", message);
+    }
+}
+
 static void update_irq(MCPXAPUState *d)
 {
     if (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
@@ -176,6 +194,7 @@ static void throttle(MCPXAPUState *d)
     throttle_update_debug(d, start_us);
     int queued_bytes = -1;
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     if (d->monitor.stream) {
         queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
         if (queued_bytes >= 0) {
@@ -189,6 +208,7 @@ static void throttle(MCPXAPUState *d)
             queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
         }
     }
+#endif
 
     if (queued_bytes < 0 || queued_bytes > d->monitor.queued_bytes_low) {
         int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
@@ -257,6 +277,7 @@ static void se_frame(MCPXAPUState *d)
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+    mcpx_apu_boot_trace_mark("b2 thread=mcpx-apu-frame started");
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
         if (d->pause_requested) {
@@ -427,6 +448,7 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     qemu_add_vm_change_state_handler(mcpx_apu_vm_state_change, d);
     qemu_thread_create(&d->apu_thread, "mcpx.apu_thread", mcpx_apu_frame_thread,
                        d, QEMU_THREAD_JOINABLE);
+    mcpx_apu_boot_trace_mark("b2 thread=mcpx-apu-frame created");
     mcpx_apu_wait_for_idle(d);
     qemu_mutex_unlock(&d->lock);
 }

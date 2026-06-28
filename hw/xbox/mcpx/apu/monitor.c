@@ -19,6 +19,26 @@
 
 #include "apu_int.h"
 
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+
+void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
+{
+    d->monitor.stream = NULL;
+    d->monitor.queued_bytes_low = 0;
+    d->monitor.queued_bytes_high = 0;
+}
+
+void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+{
+}
+
+void mcpx_apu_monitor_frame(MCPXAPUState *d)
+{
+    memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+}
+
+#else
+
 void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
 {
     SDL_AudioSpec spec = {
@@ -82,3 +102,5 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
 
     memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
 }
+
+#endif
