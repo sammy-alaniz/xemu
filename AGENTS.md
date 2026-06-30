@@ -45,6 +45,17 @@ Current long-term goal:
   not count it as a run. Do not start another run before writing the previous
   history entry unless the run produced no useful artifact; if the failure
   changes the next action, write the failed-run entry too.
+- Independent critique checkpoint: when two consecutive experiments fail to
+  improve/explain the primary metric, when a run would repeat a historical or
+  negative-control mode, when scope would broaden back to old B3/B4/B5 or
+  generic timer/display/PFIFO work, or when the B6 success contract might be
+  weakened, spawn a highest-reasoning sub-agent for critique. Prefer `gpt-5.5`
+  with `xhigh` reasoning when available. Use the exact prompt shape in
+  `goal.md`. The sub-agent should not edit files unless explicitly given a
+  disjoint write scope, and its critique must end in one decision: continue,
+  revise, or stop. Treat the checkpoint as single-shot per trigger: run or
+  reject one concrete next step after the critique, write one `history/` entry,
+  and do not recursively spawn critique agents unless a human asks.
 - Treat `build-real-b3-matrix/browser-runtime-firefox-bidi-section-map-v2-combined.log`
   as the stable B5-pass/read-proof browser baseline, not the front-most B6 CPU
   diagnostic. Treat

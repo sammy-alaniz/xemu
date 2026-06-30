@@ -59,6 +59,11 @@ contract; do not use older diagnostic history here to override `goal.md`.
 Every experiment/run should also produce a numbered markdown write-up under
 `history/` using the template there, so the project keeps an auditable trail of
 purpose, findings, and follow-up decisions.
+If progress stalls or the next run would repeat a historical/negative-control
+path, use the independent critique checkpoint defined in `goal.md`: ask a
+highest-reasoning sub-agent, preferably `gpt-5.5` with `xhigh` reasoning, to
+critique whether the work is looping and what narrow fact would change the B6
+boundary.
 
 ## Current Repo Anchors
 

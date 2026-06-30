@@ -34,6 +34,80 @@ If a proposed run uses a historical or negative-control mode, first state which
 current field regressed or which new instrumentation makes the run answer a new
 question. Otherwise use the current active diagnostic instead.
 
+## Independent Critique Checkpoint
+
+Use a sub-agent critique as a pre-run anti-loop checkpoint, not as a B6 evidence
+gate and not as another open-ended investigation. Spawn the highest-reasoning
+available sub-agent, preferably `gpt-5.5` with `xhigh` reasoning, and ask it to
+critique the current state before continuing when any of these triggers happen:
+
+- Two consecutive experiments fail to improve or explain the primary progress
+  metric.
+- A proposed run would repeat a historical or negative-control mode.
+- The next step would broaden scope back to B3/B4/B5, storage, display,
+  PFIFO/PGRAPH progress, generic timer pumping, or visual comparison before
+  browser-runtime `dashboard=xbe-executed`.
+- A change would weaken the B6 success contract or promote diagnostic evidence
+  to completion evidence.
+- The active artifact roles or next three actions feel stale or contradictory.
+
+The critique request must be bounded. Give the sub-agent the current `goal.md`,
+the latest history entries, and the relevant comparator summaries. Use this
+prompt shape:
+
+```text
+You are a GPT-5.5/xhigh critique sub-agent. Do not edit files. This is a
+bounded anti-loop checkpoint, not an open-ended investigation.
+
+Review the current goal.md, the latest relevant history entries, and the latest
+comparator summaries. The project is pursuing B6 dashboard-loaded verification.
+B3/B4/B5, section-map proof, and native execution/reference are not the current
+blocker. Strict B6 still requires browser-runtime dashboard XBE
+read/load/entry-ready/execute plus browser-vs-native visual match.
+
+Active progress metric:
+Move pre_service_browser_first_watch_read_ticks from browser 0 toward native 136
+while preserving B4/B5, dashboard read/load/entry-ready, section-map, PFIFO
+stream-idle, vector 0x30 service/IRET, and the 0x80030e84->0x80030f31
+post-service edge.
+
+Answer exactly:
+
+1. Are we looping? If yes, which repeated action or assumption proves it?
+2. What is the narrowest next fact that would change the B6 boundary?
+3. Which hypothesis should be killed, kept, or revised?
+4. Is the proposed next run justified by the loop guard? Name the exact field it
+   can change or explain.
+5. What is one better experiment, if any, and what single loop-guard field would
+   it change?
+
+End with exactly one decision: continue, revise, or stop.
+Do not propose another critique sub-agent. Do not propose B3/B4/B5,
+native-reference, visual-comparison, or diagnostic-contract weakening work unless
+a current field regressed or browser-runtime dashboard=xbe-executed exists.
+```
+
+If not using the exact prompt above, the custom prompt must still ask exactly:
+
+1. Are we looping? If yes, which repeated action or assumption shows it?
+2. What is the narrowest next fact that would change the B6 boundary?
+3. Which current hypothesis should be killed, kept, or revised?
+4. Is the proposed next run justified by the loop guard?
+5. What is one better experiment, if any, and what field would it change?
+
+The sub-agent must not edit files unless explicitly assigned a disjoint write
+scope. Its critique should produce one markdown history entry under `history/`
+and one concrete decision: continue, revise, or stop the proposed run. Do not
+spawn another critique sub-agent in response to the critique unless a human asks
+for it.
+
+Make the checkpoint single-shot per trigger: after one critique, run or reject
+exactly one concrete next step, then write one `history/` entry. Do not call
+another critique until two more experiments fail against the progress metric, a
+human explicitly asks, or the active loop-guard fields materially change. If the
+critique cannot name one field its proposed experiment changes, the decision
+must be `stop` or `revise`, not "investigate more."
+
 ## Run History Requirement
 
 After every experiment, run, or probe, create a write-up under `history/`.

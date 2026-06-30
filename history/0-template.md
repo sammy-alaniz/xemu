@@ -31,6 +31,9 @@
 
 - Status: current | historical support | negative evidence | failed run
 - Why:
+- Independent critique used: yes | no
+- If yes, critique decision: continue | revise | stop
+- If yes, critique summary:
 
 ## Next Step
 
