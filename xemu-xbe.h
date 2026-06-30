@@ -140,6 +140,10 @@ bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void);
 // main-loop timer pass at the PFIFO stream-idle transition edge.
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_enabled(void);
 
+// True when the PFIFO ready-edge timer diagnostic should use the native-style
+// all-clocks timer dispatch instead of the bounded virtual-only dispatch.
+bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_all_timers(void);
+
 // True when the active browser host-side timer diagnostic should make an
 // extra pump attempt immediately before the headless host loop sleeps.
 bool xemu_xbe_boot_trace_main_loop_timer_pump_presleep_enabled(void);

@@ -421,8 +421,21 @@ pre_service_browser_first_read_edge="$(value_for "${pre_service_line}" browser_f
 pre_service_browser_timer_source="$(value_for "${pre_service_line}" browser_first_timer_source)"
 pre_service_browser_timer_ticks="$(value_for "${pre_service_line}" browser_first_timer_watch_ticks)"
 pre_service_browser_read_before_write="$(value_for "${pre_service_line}" browser_first_watch_read_before_write)"
+pre_service_browser_write_before_read="$(value_for "${pre_service_line}" browser_first_watch_write_before_read)"
 pre_service_browser_write_delta="$(value_for "${pre_service_line}" browser_first_watch_write_delta_from_read)"
+pre_service_native_timer_virtual_expired_before="$(value_for "${pre_service_line}" native_first_timer_virtual_expired_before)"
+pre_service_native_timer_virtual_advance_ns="$(value_for "${pre_service_line}" native_first_timer_virtual_advance_ns)"
+pre_service_native_timer_delta_to_read="$(value_for "${pre_service_line}" native_first_timer_delta_to_read)"
+pre_service_browser_timer_virtual_expired_before="$(value_for "${pre_service_line}" browser_first_timer_virtual_expired_before)"
+pre_service_browser_timer_virtual_advance_ns="$(value_for "${pre_service_line}" browser_first_timer_virtual_advance_ns)"
+pre_service_browser_timer_delta_to_read="$(value_for "${pre_service_line}" browser_first_timer_delta_to_read)"
+pre_service_browser_timer_delta_to_write="$(value_for "${pre_service_line}" browser_first_timer_delta_to_write)"
+pre_service_browser_timer_delta_to_service="$(value_for "${pre_service_line}" browser_first_timer_delta_to_service)"
+pre_service_browser_service_before_read="$(value_for "${pre_service_line}" browser_first_service_before_read)"
+pre_service_browser_service_delta_to_read="$(value_for "${pre_service_line}" browser_first_service_delta_to_read)"
 pre_service_browser_service_eip="$(value_for "${pre_service_line}" browser_first_service_eip)"
+pre_service_browser_iret_after_service_line="$(value_for "${pre_service_line}" browser_first_iret_after_service_line)"
+pre_service_browser_iret_after_service_eip="$(value_for "${pre_service_line}" browser_first_iret_after_service_eip)"
 memory_watch_timeline_result="$(value_for "${memory_watch_timeline_line}" result)"
 memory_watch_timeline_divergence="$(value_for "${memory_watch_timeline_line}" divergence)"
 memory_watch_timeline_shared_delta="$(value_for "${memory_watch_timeline_line}" shared_poll_tick_delta)"
@@ -540,8 +553,21 @@ pre_service_browser_first_read_edge="${pre_service_browser_first_read_edge:-unkn
 pre_service_browser_timer_source="${pre_service_browser_timer_source:-unknown}"
 pre_service_browser_timer_ticks="${pre_service_browser_timer_ticks:-unknown}"
 pre_service_browser_read_before_write="${pre_service_browser_read_before_write:-unknown}"
+pre_service_browser_write_before_read="${pre_service_browser_write_before_read:-unknown}"
 pre_service_browser_write_delta="${pre_service_browser_write_delta:-unknown}"
+pre_service_native_timer_virtual_expired_before="${pre_service_native_timer_virtual_expired_before:-unknown}"
+pre_service_native_timer_virtual_advance_ns="${pre_service_native_timer_virtual_advance_ns:-unknown}"
+pre_service_native_timer_delta_to_read="${pre_service_native_timer_delta_to_read:-unknown}"
+pre_service_browser_timer_virtual_expired_before="${pre_service_browser_timer_virtual_expired_before:-unknown}"
+pre_service_browser_timer_virtual_advance_ns="${pre_service_browser_timer_virtual_advance_ns:-unknown}"
+pre_service_browser_timer_delta_to_read="${pre_service_browser_timer_delta_to_read:-unknown}"
+pre_service_browser_timer_delta_to_write="${pre_service_browser_timer_delta_to_write:-unknown}"
+pre_service_browser_timer_delta_to_service="${pre_service_browser_timer_delta_to_service:-unknown}"
+pre_service_browser_service_before_read="${pre_service_browser_service_before_read:-unknown}"
+pre_service_browser_service_delta_to_read="${pre_service_browser_service_delta_to_read:-unknown}"
 pre_service_browser_service_eip="${pre_service_browser_service_eip:-unknown}"
+pre_service_browser_iret_after_service_line="${pre_service_browser_iret_after_service_line:-unknown}"
+pre_service_browser_iret_after_service_eip="${pre_service_browser_iret_after_service_eip:-unknown}"
 memory_watch_timeline_result="${memory_watch_timeline_result:-unknown}"
 memory_watch_timeline_divergence="${memory_watch_timeline_divergence:-unknown}"
 memory_watch_timeline_shared_delta="${memory_watch_timeline_shared_delta:-unknown}"
@@ -638,6 +664,33 @@ if [ "${section_map_result}" != "pass" ] \
     summary_result="fail"
     summary_reason="required-diagnostic-failed"
 fi
+
+printf 'B6_CURRENT_BOUNDARY_PRE_SERVICE_ORDER result=%s divergence=%s first_watch_read_tick_delta=%s native_first_watch_read_ticks=%s browser_first_watch_read_ticks=%s native_first_watch_read_edge=%s browser_first_watch_read_edge=%s native_first_timer_virtual_expired_before=%s native_first_timer_virtual_advance_ns=%s native_first_timer_delta_to_read=%s browser_first_timer_source=%s browser_first_timer_watch_ticks=%s browser_first_timer_virtual_expired_before=%s browser_first_timer_virtual_advance_ns=%s browser_first_timer_delta_to_read=%s browser_first_timer_delta_to_write=%s browser_first_timer_delta_to_service=%s browser_first_service_before_read=%s browser_first_service_delta_to_read=%s browser_first_service_eip=%s browser_first_watch_read_before_write=%s browser_first_watch_write_before_read=%s browser_first_watch_write_delta_from_read=%s browser_first_iret_after_service_line=%s browser_first_iret_after_service_eip=%s\n' \
+    "${pre_service_result}" \
+    "${pre_service_divergence}" \
+    "${pre_service_tick_delta}" \
+    "${pre_service_native_first_read_ticks}" \
+    "${pre_service_browser_first_read_ticks}" \
+    "${pre_service_native_first_read_edge}" \
+    "${pre_service_browser_first_read_edge}" \
+    "${pre_service_native_timer_virtual_expired_before}" \
+    "${pre_service_native_timer_virtual_advance_ns}" \
+    "${pre_service_native_timer_delta_to_read}" \
+    "${pre_service_browser_timer_source}" \
+    "${pre_service_browser_timer_ticks}" \
+    "${pre_service_browser_timer_virtual_expired_before}" \
+    "${pre_service_browser_timer_virtual_advance_ns}" \
+    "${pre_service_browser_timer_delta_to_read}" \
+    "${pre_service_browser_timer_delta_to_write}" \
+    "${pre_service_browser_timer_delta_to_service}" \
+    "${pre_service_browser_service_before_read}" \
+    "${pre_service_browser_service_delta_to_read}" \
+    "${pre_service_browser_service_eip}" \
+    "${pre_service_browser_read_before_write}" \
+    "${pre_service_browser_write_before_read}" \
+    "${pre_service_browser_write_delta}" \
+    "${pre_service_browser_iret_after_service_line}" \
+    "${pre_service_browser_iret_after_service_eip}"
 
 printf 'B6_CURRENT_BOUNDARY_RESULT result=%s reason=%s b6=%s b6_reason=%s native_xbe_executed=%s browser_xbe_executed=%s native_xbe_detector_proof=%s browser_xbe_detector_proof=%s native_actual_execution=%s native_actual_reason=%s native_direct_entry_pc=%s native_first_entry_ready_cpu=%s native_first_after_idle_edge=%s native_after_idle_cpu_interrupt_nonzero=%s native_handoff=%s native_handoff_state=%s native_handoff_boot_reason=%s native_handoff_short_animation=%s native_handoff_native_reference=%s native_handoff_latest_stream_idle_eip=%s native_handoff_latest_stream_idle_cpu_interrupt=%s native_handoff_after_idle_top_edge=%s native_handoff_after_idle_cpu_interrupt_nonzero=%s section_map=%s iret=%s iret_divergence=%s post_command_loop=%s loop_divergence=%s after_idle_divergence=%s after_idle_cpu_interrupt_divergence=%s post_service_memory_poll=%s post_service_memory_poll_divergence=%s shared_memory_poll_addr=%s native_shared_memory_poll_value=%s browser_shared_memory_poll_value=%s shared_memory_poll_tick_unit=%s native_shared_memory_poll_ticks=%s browser_shared_memory_poll_ticks=%s shared_memory_poll_tick_delta=%s shared_memory_poll_tick_relation=%s native_main_loop_timer_memory_watch_samples=%s browser_main_loop_timer_memory_watch_samples=%s native_main_loop_timer_max_memory_watch_value=%s browser_main_loop_timer_max_memory_watch_value=%s native_main_loop_timer_max_memory_watch_ticks=%s browser_main_loop_timer_max_memory_watch_ticks=%s native_main_loop_timer_last_memory_watch_value=%s browser_main_loop_timer_last_memory_watch_value=%s native_main_loop_timer_last_memory_watch_ticks=%s browser_main_loop_timer_last_memory_watch_ticks=%s native_post_service_top_edge=%s browser_post_service_top_edge=%s post_service_watch_edge=%s post_service_watch_edge_divergence=%s watch_edge_pre_tick_delta=%s watch_edge_post_tick_delta=%s watch_edge_block_delta_match=%s native_watch_edge_pre_ticks=%s browser_watch_edge_pre_ticks=%s native_watch_edge_post_ticks=%s browser_watch_edge_post_ticks=%s native_watch_edge_block_delta_ticks=%s browser_watch_edge_block_delta_ticks=%s native_watch_edge_pre_edge=%s browser_watch_edge_pre_edge=%s native_watch_edge_post_edge=%s browser_watch_edge_post_edge=%s pre_service_tick_gap=%s pre_service_tick_gap_divergence=%s pre_service_first_watch_read_tick_delta=%s pre_service_native_first_watch_read_ticks=%s pre_service_browser_first_watch_read_ticks=%s pre_service_native_first_watch_read_edge=%s pre_service_browser_first_watch_read_edge=%s pre_service_browser_first_timer_source=%s pre_service_browser_first_timer_watch_ticks=%s pre_service_browser_first_watch_read_before_write=%s pre_service_browser_first_watch_write_delta_from_read=%s pre_service_browser_first_service_eip=%s memory_watch_timeline=%s memory_watch_timeline_divergence=%s memory_watch_timeline_shared_delta=%s native_watch_install=%s browser_watch_install=%s native_watch_access_events=%s browser_watch_access_events=%s native_watch_write_events=%s browser_watch_write_events=%s native_first_watch_write_eip=%s browser_first_watch_write_eip=%s native_first_watch_write_ticks=%s browser_first_watch_write_ticks=%s native_first_watch_write_value=%s browser_first_watch_write_value=%s browser_last_watch_write_value=%s native_first_shared_poll_ticks=%s browser_first_shared_poll_ticks=%s headless_pump=%s headless_pump_divergence=%s headless_pump_host_ready_before_boundary=%s headless_pump_timer_before_boundary=%s headless_pump_timer_after_boundary=%s headless_pump_first_timer_watch_zero=%s headless_pump_first_memory_write_zero=%s headless_pump_first_host_ready_line=%s headless_pump_boundary_line=%s headless_pump_first_timer_line=%s headless_pump_first_timer_placement=%s post_idle_flow=%s post_idle_flow_divergence=%s post_idle_timer_divergence=%s first_flow_mismatch_index=%s native_main_loop_timer_events=%s browser_main_loop_timer_events=%s native_main_loop_timer_sources=%s browser_main_loop_timer_sources=%s native_main_loop_timer_progress_events=%s browser_main_loop_timer_progress_events=%s native_tcg_timer_events=%s browser_tcg_timer_events=%s native_tcg_timer_progress_events=%s browser_tcg_timer_progress_events=%s pfifo_transition=%s pfifo_transition_divergence=%s current_boundary=%s next=%s native_log=%s native_proof_log=%s native_memory_watch_log=%s browser_log=%s\n' \
     "${summary_result}" \

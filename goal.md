@@ -179,18 +179,18 @@ preserving:
 | `build-real-b3-matrix/browser-runtime-firefox-bidi-section-map-v2-combined.log` | B5-pass/read-proof browser baseline | Stable, not front-most |
 | `build-real-b3-matrix/browser-memory-watch-write-0x3a890-v2-combined.log` | Stable browser write-watch comparison | Historical support |
 | `build-real-b3-matrix/browser-memory-sample-0x3a890-full-baseline-v1-combined.log` | Previous cheap memory-sample diagnostic | Historical support |
-| PCRTC pre-stream, normal-vblank, ready-edge-only, PFIFO pre-commit, and limit136 probes | Negative controls | Do not rerun unless a current field regresses or new instrumentation changes the question |
+| PCRTC pre-stream, normal-vblank, ready-edge-only, ready-edge all-timers, PFIFO pre-commit, and limit136 probes | Negative controls | Do not rerun unless a current field regresses or new instrumentation changes the question |
 
 ## Next Three Actions
 
 1. Identify the producer/order for physical `0x0003a890` before the browser's
    first watched read.
-2. Instrument timer deadline, virtual clock delta, main-loop dispatch, and
-   CPU/yield ordering before `0x80014f32->0x80030e84`.
-3. Test one scheduling change that moves the browser first watched read toward
-   native's 136 ticks without regressing B4/B5/read/load/entry-ready,
-   section-map, stream-idle, vector `0x30` service/IRET, or the post-service
-   edge.
+2. Keep the current ready-edge plus host-fallback baseline as the front-most
+   browser artifact; do not promote the ready-edge all-timers variant because it
+   regresses the useful service/IRET/post-service path.
+3. Isolate why the virtual-only ready-edge event sets
+   `cpu_interrupt_request=0x00000002` before service while the watched word is
+   still zero at the first `0x80014f32->0x80030e84` read.
 
 ## Current Boundary
 
@@ -508,6 +508,24 @@ is negative evidence. It proves the one-shot ready-edge pump can run before
 the PFIFO stream-idle boundary, but without the bounded host fallback it loses
 the useful main-loop timer progress and reports
 `next=restore-browser-main-loop-timer-progress`.
+
+Fresh ready-edge all-timers probe, 2026-06-30:
+`build-real-b3-matrix/browser-memory-watch-write-0x3a890-ready-edge-all-v2/browser-runtime.log`
+is negative evidence. It uses the opt-in
+`XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_MODE=pfifo-ready-edge-qemu-pump-all`,
+which keeps the same PFIFO ready-edge placement but replaces the current
+virtual-only one-timer dispatch with `qemu_clock_run_all_timers()`. The browser
+runtime evidence, B4 display capture, dashboard load/entry-ready, and section-map
+evidence pass, but the useful CPU-flow evidence regresses: the pre-service
+comparator reports `result=fail divergence=missing-first-watch-read`, the
+boundary helper reports `browser_post_service_top_edge=0x8001b02f->0x8001b030`,
+`iret=fail`, `post_service_watch_edge=fail`,
+`post_idle_timer_divergence=browser-missing-main-loop-timer-progress`, and
+`next=restore-browser-main-loop-timer-progress`. The all-timers ready-edge
+marker advances virtual time by `130299904` ns but still samples
+`memory_watch_value=0x00000000`, and no browser-runtime
+`dashboard=xbe-executed` marker appears. Do not promote or rerun this mode
+unless a future field regresses or new instrumentation changes the question.
 
 Fresh PFIFO pre-commit probe, 2026-06-30:
 `build-real-b3-matrix/browser-memory-watch-write-0x3a890-precommit-v1-combined.log`

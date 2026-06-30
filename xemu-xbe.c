@@ -791,8 +791,16 @@ static bool xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge(
 {
     return mode &&
            (!g_ascii_strcasecmp(mode, "pfifo-ready-edge-qemu-pump") ||
+            !g_ascii_strcasecmp(mode, "pfifo-ready-edge-qemu-pump-all") ||
             !g_ascii_strcasecmp(mode, "pfifo-stream-idle-ready-edge") ||
             !g_ascii_strcasecmp(mode, "ready-edge"));
+}
+
+static bool xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge_all_timers(
+    const char *mode)
+{
+    return mode &&
+           !g_ascii_strcasecmp(mode, "pfifo-ready-edge-qemu-pump-all");
 }
 
 static bool xemu_xbe_main_loop_timer_source_is_browser_diagnostic(
@@ -800,7 +808,8 @@ static bool xemu_xbe_main_loop_timer_source_is_browser_diagnostic(
 {
     return source &&
            (!strcmp(source, "browser-headless-host-pump-bounded") ||
-            !strcmp(source, "browser-ready-edge-qemu-pump"));
+            !strcmp(source, "browser-ready-edge-qemu-pump") ||
+            !strcmp(source, "browser-ready-edge-qemu-pump-all"));
 }
 
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void)
@@ -865,6 +874,15 @@ bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_enabled(void)
            xemu_xbe_boot_trace_entry_ready() &&
            xemu_xbe_main_loop_timer_probe_limit() > 0 &&
            xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge(mode);
+}
+
+bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_all_timers(void)
+{
+    const char *mode = xemu_xbe_browser_headless_timer_pump_mode();
+
+    return xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_enabled() &&
+           xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge_all_timers(
+               mode);
 }
 
 bool xemu_xbe_boot_trace_main_loop_timer_pump_presleep_enabled(void)
@@ -964,6 +982,11 @@ static const char *xemu_xbe_browser_headless_timer_pump_mode(void)
                !g_ascii_strcasecmp(value, "pfifo-stream-idle-ready-edge") ||
                !g_ascii_strcasecmp(value, "ready-edge")) {
         g_strlcpy(mode, "pfifo-ready-edge-qemu-pump", sizeof(mode));
+    } else if (!g_ascii_strcasecmp(value, "pfifo-ready-edge-qemu-pump-all") ||
+               !g_ascii_strcasecmp(value, "pfifo-ready-edge-all") ||
+               !g_ascii_strcasecmp(value, "ready-edge-all") ||
+               !g_ascii_strcasecmp(value, "ready-edge-all-timers")) {
+        g_strlcpy(mode, "pfifo-ready-edge-qemu-pump-all", sizeof(mode));
     } else {
         fprintf(stderr,
                 "Invalid XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_MODE='%s'; "
@@ -4906,6 +4929,7 @@ void xemu_xbe_boot_trace_observe_main_loop_timers(
             " memory_watch_phys=0x%08" PRIx64
             " memory_watch_value_read=%s"
             " memory_watch_value=0x%08" PRIx32
+            " stream_idle=%s"
             " nv2a_wait_present=%s"
             " nv2a_wait_generation=%" PRIu64
             " nv2a_wait_source=%s"
@@ -4940,6 +4964,7 @@ void xemu_xbe_boot_trace_observe_main_loop_timers(
             memory_watch_phys,
             xemu_xbe_bool_str(memory_watch_value_read),
             memory_watch_value,
+            xemu_xbe_bool_str(xemu_xbe_nv2a_wait_is_stream_idle(&wait_state)),
             xemu_xbe_bool_str(wait_state.present),
             wait_state.generation,
             wait_state.present ? wait_state.state.source : "none",

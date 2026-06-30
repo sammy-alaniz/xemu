@@ -499,6 +499,7 @@ static void pfifo_boot_trace_ready_edge_timer_pump(NV2AState *d)
     bool virtual_expired_before;
     bool virtual_has_timers_after;
     bool virtual_expired_after;
+    const char *source = "browser-ready-edge-qemu-pump";
     bool progress;
 
     if (pumped ||
@@ -521,16 +522,20 @@ static void pfifo_boot_trace_ready_edge_timer_pump(NV2AState *d)
         qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
     virtual_has_timers_before = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
     virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
-    progress = qemu_clock_run_timers_with_attrs_limit(
-        QEMU_CLOCK_VIRTUAL, 0, 0, 1);
+    if (xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_all_timers()) {
+        source = "browser-ready-edge-qemu-pump-all";
+        progress = qemu_clock_run_all_timers();
+    } else {
+        progress = qemu_clock_run_timers_with_attrs_limit(
+            QEMU_CLOCK_VIRTUAL, 0, 0, 1);
+    }
     virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     virtual_deadline_after =
         qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
     virtual_has_timers_after = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
     virtual_expired_after = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
     xemu_xbe_boot_trace_observe_main_loop_timers(
-        "browser-ready-edge-qemu-pump",
-        0, 0, virtual_now_before, virtual_deadline_before,
+        source, 0, 0, virtual_now_before, virtual_deadline_before,
         virtual_has_timers_before, virtual_expired_before, progress,
         virtual_now_after, virtual_deadline_after, virtual_has_timers_after,
         virtual_expired_after);
