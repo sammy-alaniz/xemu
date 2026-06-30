@@ -38,8 +38,27 @@ Use these boot levels to avoid vague progress claims.
 | B3 | Storage boot path is active | IDE/block logs show HDD sector reads from the expected dashboard partitions and no missing/invalid media errors |
 | B4 | Dashboard or boot animation reaches display path | Canvas or framebuffer capture shows reproducible non-empty frames matching native reference captures |
 | B5 | Browser run is usable | Browser page can configure assets, persist EEPROM/config, start/stop, and collect logs without devtools-only manual steps |
+| B6 | Dashboard is loaded and identifiable | Logs prove the dashboard XBE was read/loaded/executed, and browser frames match native reference frames closely enough to treat the dashboard as loaded rather than merely producing non-empty scanout |
 
 The first serious browser-port gate is B3, not B4. A null-renderer browser build that reaches B3 proves most non-graphics boot blockers have been cleared.
+
+Current long-term target after the completed B3/B4/B5 evidence chain is B6:
+make "dashboard loaded" a verifiable state. B6 is intentionally stronger than
+B4. B4 only proves real non-empty browser display output; B6 must prove the
+dashboard path itself was reached and rendered with recognizable fidelity. The
+active goal is to add reliable dashboard/XBE read-load-execute markers, capture
+native reference frames, use Playwright-preferred browser visual capture with
+Firefox BiDi fallback, compare browser frames to native references, and keep an
+auditable B6 evidence checker that never treats non-empty scanout alone as
+dashboard completion.
+
+For current B6 work, treat `goal.md` as the live state machine: it names the
+active artifact roles, loop guards, progress metric, next three actions, and
+commands to start from. This plan preserves the boot ladder and evidence
+contract; do not use older diagnostic history here to override `goal.md`.
+Every experiment/run should also produce a numbered markdown write-up under
+`history/` using the template there, so the project keeps an auditable trail of
+purpose, findings, and follow-up decisions.
 
 ## Current Repo Anchors
 
@@ -210,6 +229,904 @@ Exit criteria:
 
 - Browser run reaches B4, or the exact renderer gap blocking B4 is identified.
 - Display work is based on measured gaps, not assumptions from the desktop OpenGL backend.
+
+Current Phase 6 status:
+
+- B4 has been proven with `source=browser-framebuffer` and
+  `BROWSER_DISPLAY_CAPTURE result=pass nonempty=yes`.
+- The current browser display can look noisy or partial because it is a
+  framebuffer/scanout bridge on top of the reduced browser/null-rendered boot
+  profile, not a full browser NV2A renderer.
+- Do not treat B4 as "dashboard fully loaded." The next proof target is B6.
+
+## Phase 6.6: B6 Dashboard Loaded Evidence
+
+Goal: replace visual guesswork with a specific, auditable dashboard-loaded
+signal.
+
+| Task | Work | Verification |
+| --- | --- | --- |
+| 6.6.1 FATX/XBE read correlation | Map IDE guest-LBA reads back to FATX files and detect reads from dashboard XBE candidates such as `xboxdash.xbe`. | Log emits `BOOT_MARK b6 dashboard=xbe-read context=browser-runtime ...` with file name, byte range, and backing sector evidence for final B6; native-headless matches are diagnostic only. |
+| 6.6.2 XBE load detection | Detect XBE headers and image load into guest memory. | Log emits `BOOT_MARK b6 dashboard=xbe-loaded context=browser-runtime ...` with guest address and image metadata, plus `dashboard=xbe-entry-probe status=ready entry_code_read=yes phys_match=yes` to prove the decoded entry page is readable and physically matched without logging proprietary content. |
+| 6.6.3 XBE execution detection | Detect CPU execution entering the loaded dashboard XBE region. | Log emits `BOOT_MARK b6 dashboard=xbe-executed context=browser-runtime ...` after code fetch or control transfer into the loaded range. |
+| 6.6.3a High-alias false-positive guard | For high-bit PCs that numerically overlap the XBE virtual range, compare executing code hashes against the loaded low XBE image bytes without dumping proprietary bytes. | Diagnostic log emits bounded `dashboard=xbe-alias-compare ... phys_match=<yes/no> code_hash_match=<yes/no>`; it must not satisfy B6 by itself. |
+| 6.6.3b Alias hash audit helper | Aggregate high-alias compare samples and compare their hashes with the dashboard XBE file bytes without dumping proprietary bytes. | `scripts/xbox-dashboard-xbe-hash-evidence.py --hdd <hdd> --log <log> --require-context browser-runtime` emits `DASHBOARD_XBE_HASH_EVIDENCE ...`; it is diagnostic only and must not satisfy B6 by itself. |
+| 6.6.3c Entry-target hash guard | For decoded branch targets near the dashboard entry point, hash the target bytes and corresponding low XBE image bytes without dumping proprietary bytes. | Diagnostic log emits bounded `dashboard=xbe-entry-target-probe ... target_code_hash=... target_image_code_hash=...`; the hash audit helper reports `target_disk_hash_match=<n>`. It must not satisfy B6 by itself. |
+| 6.6.4 Native reference frames | Capture native xemu reference frames using the same legal local assets and build metadata. | Reference artifacts record build hash, asset identity hashes that do not expose content, frame dimensions, and perceptual/hash summaries, then emit `NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless ... dashboard=xbe-executed ...`. `scripts/xbox-native-reference-evidence-check.sh <log>` validates that provenance. |
+| 6.6.5 Browser frame comparison | Capture browser canvas frames with Playwright when available and Firefox BiDi fallback otherwise. Compare against native references supplied with `XEMU_BROWSER_DASHBOARD_NATIVE_HASH=<native-frame-hash>`. | Log emits `BROWSER_DASHBOARD_CAPTURE result=pass native_ref_match=yes ...` whose `native_hash` matches a validated `NATIVE_DASHBOARD_REFERENCE` line. By default `XEMU_BROWSER_DASHBOARD_CAPTURE_REQUIRE_EXECUTED=1` makes this evidence skip until browser-runtime `dashboard=xbe-executed` exists. |
+| 6.6.6 B6 evidence checker | Add a dedicated checker for dashboard-loaded proof. | `scripts/xbox-dashboard-loaded-evidence-check.sh <log>` passes only when browser-runtime XBE read/load/entry-ready/execute, native reference provenance, and visual reference evidence are present; `scripts/xbox-dashboard-loaded-evidence-check-selftest.sh` covers the checker contract. |
+
+Exit criteria:
+
+- Browser log contains explicit dashboard XBE read/load/entry-ready/execute markers.
+- Combined B6 evidence contains `NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless ... dashboard=xbe-executed ...`.
+- Browser display evidence matches native reference frames closely enough to
+  distinguish dashboard output from random/non-empty scanout.
+- Completion audit has a separate B6 item and does not infer B6 from B4.
+
+B6 evidence contract:
+
+```text
+BOOT_MARK b6 dashboard=xbe-read context=browser-runtime file=<name>.xbe ...
+BOOT_MARK b6 dashboard=xbe-loaded context=browser-runtime guest_addr=0x... source=virtual-header ...
+BOOT_MARK b6 dashboard=xbe-entry-probe context=browser-runtime status=ready entry_code_read=yes phys_match=yes ...
+BOOT_MARK b6 dashboard=xbe-executed context=browser-runtime guest_pc=0x... ...
+NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless source=native-framebuffer hash=<hex> width=<n> height=<n> dashboard=xbe-executed ...
+BROWSER_DASHBOARD_CAPTURE result=pass native_ref_match=yes hash=<hex> native_hash=<hex> source=browser-framebuffer width=<n> height=<n>
+```
+
+The B6 checker validates this contract only; it does not generate dashboard
+evidence. The current implementation can correlate native-headless IDE guest
+LBA reads to the dashboard XBE, but B6 still requires browser-runtime
+dashboard read/load/entry-ready/execute markers and native reference-frame comparison
+before it can pass. The browser-runtime read side is proven in the Firefox
+BiDi IDE-poll diagnostic path, and focused read-progress diagnostics now prove
+browser-runtime `dashboard=xbe-loaded source=virtual-header` plus entry-ready
+probing. Entry readiness is a required precondition, not execution evidence.
+The current alias-compare diagnostic also proves sampled high-alias overlaps
+in `build-real-b3-matrix/browser-runtime-firefox-bidi-alias-compare-combined.log`
+have `phys_match=no` and `code_hash_match=no`. The current alias hash audit
+also reports `samples=32 comparable=32 guest_image_hash_match=0
+guest_disk_hash_match=0`, with two low-image samples matching the disk hash
+under the raw image-offset model. Those sampled high-alias paths are kernel
+paths, not dashboard bytes executed through a different alias.
+The entry-target diagnostic now also hashes decoded branch target bytes and the
+corresponding low XBE image bytes, then the hash audit helper reports
+`target_disk_hash_match` and `target_image_disk_hash_match`. The fresh
+`build-real-b3-matrix/browser-runtime-firefox-bidi-target-hash-v1.log` artifact
+reports `target_samples=16 target_comparable=16 target_disk_hash_match=0`, so
+the sampled decoded targets also do not match dashboard file bytes. This is a
+diagnostic guard only: a target hash match would identify a handoff candidate
+to investigate, but B6 still requires actual browser-runtime `xbe-executed`
+evidence plus a native reference-frame match.
+The active B6 blocker is browser-runtime `dashboard=xbe-executed` evidence plus
+native reference-frame match.
+
+Current B6 implementation status:
+
+- `xemu-xbe.c` contains `xemu_get_xbe_info()`, which reads the current XBE
+  header from guest virtual address `0x10000` and exposes base, image size,
+  entry, certificate, and title ID metadata without dumping proprietary XBE
+  contents.
+- `xemu_xbe_boot_trace_probe()` emits
+  `BOOT_MARK b6 dashboard=xbe-loaded ... source=virtual-header` once when the
+  virtual loaded-image XBE header appears. Its optional physical RAM scan emits
+  `BOOT_MARK b6 dashboard=xbe-header-resident ... source=physical-scan` only as
+  a diagnostic; that marker must not satisfy B6.
+- The same probe emits `BOOT_MARK b6 dashboard=xbe-executed ...` once the
+  synchronized i386 CPU program counter enters the loaded XBE image range.
+- `xemu_xbe_boot_trace_entry_probe()` emits bounded
+  `BOOT_MARK b6 dashboard=xbe-entry-probe ... status=unreadable|ready`
+  diagnostics around the decoded dashboard entry point. A `status=ready` entry
+  probe proves the entry code became readable and physically matched the loaded
+  image, but it is not execution evidence and must not satisfy B6 by itself.
+- `xemu_xbe_boot_trace_entry_target_probe()` emits bounded
+  `BOOT_MARK b6 dashboard=xbe-entry-target-probe ...` diagnostics when decoded
+  branch targets fall within a configurable window around the dashboard entry
+  point. The knobs are `XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_LIMIT` and
+  `XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_WINDOW`. These markers include hashed
+  branch-target and low-image bytes (`target_code_hash` and
+  `target_image_code_hash`) without dumping proprietary content. They are
+  diagnostic only and must not satisfy B6 by themselves.
+- `xemu_xbe_boot_trace_dispatch_probe()` emits bounded
+  `BOOT_MARK b6 dashboard=xbe-dispatch-probe ...` diagnostics after the
+  decoded entry point is readable. It summarizes whether registers or the top 16
+  stack words contain direct dashboard-image, entry-near, or high-alias
+  mismatch candidates. The knob is `XEMU_BOOT_TRACE_XBE_DISPATCH_LIMIT`. The
+  probe hashes stack bytes and logs candidate classifications instead of raw
+  stack contents. These markers are diagnostic only and must not satisfy B6 by
+  themselves.
+- `xemu_xbe_boot_trace_kernel_loop_probe()` emits bounded
+  `BOOT_MARK b6 dashboard=kernel-loop-probe ...` diagnostics from edge and
+  transition-sample observations after the decoded entry point is readable. The knobs
+  are `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT` and
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS`. The marker includes CPU
+  interrupt/halt/exit state plus decoded branch and memory operand summaries
+  when readable, including operand widths, virtual region, physical mapping,
+  physical address, and targeted two-byte `movzx`/`movsx` memory forms
+  (`0F B6`, `0F B7`, `0F BE`, `0F BF`). These markers are diagnostic only and
+  must not satisfy B6 by themselves.
+- Verbose TCG execution diagnostics still check for `dashboard=xbe-executed`
+  immediately after `dashboard=xbe-loaded`, but their finite probe budgets are
+  reserved until `dashboard=xbe-entry-probe status=ready` so post-entry handoff
+  evidence is not exhausted while the entry page is unreadable. Post-entry
+  execution diagnostic markers include `entry_ready=yes`.
+- `xemu_xbe_boot_trace_phys_compare_probe()` emits bounded
+  `BOOT_MARK b6 dashboard=xbe-phys-compare ... result=match|no-match`
+  diagnostics after the decoded entry point is readable. The knob is
+  `XEMU_BOOT_TRACE_XBE_PHYS_COMPARE_LIMIT`. The probe compares the executing
+  translated block's guest physical address against the physical pages backing
+  the loaded XBE virtual image and hashes matched bytes without dumping raw code.
+  These markers are diagnostic only and must not satisfy B6 by themselves.
+- `hw/xbox/nv2a/pmc.c` emits bounded
+  `BOOT_MARK b6 nv2a=pmc-access ...` diagnostics for `NV_PMC_INTR_0` and
+  `NV_PMC_INTR_EN_0`. The knob is `XEMU_BOOT_TRACE_NV2A_PMC_LIMIT`. The marker
+  includes PMC pending/enabled state before and after access plus
+  PFIFO/PCRTC/PGRAPH/PTIMER pending/enabled state. These markers are
+  diagnostic only and must not satisfy B6 by themselves.
+- The NV2A PCRTC/PGRAPH interrupt paths emit bounded
+  `BOOT_MARK b6 nv2a=irq-source ...` diagnostics for source transitions such
+  as PCRTC `vblank-raise` and PGRAPH `context-switch-raise` or
+  `notify-error-raise`. The knob is `XEMU_BOOT_TRACE_NV2A_IRQ_LIMIT`.
+  Pre-dashboard browser `pcrtc vblank-raise` events are suppressed for this
+  diagnostic so they do not saturate the B6 IRQ-source budget before dashboard
+  DMA/header observation. These markers are diagnostic only and must not
+  satisfy B6 by themselves.
+- The PGRAPH nonzero-NOP notification path emits bounded
+  `BOOT_MARK b6 pgraph=notify-error ...` diagnostics with the actual NOP
+  parameter, trapped data, PFIFO DMA get/put/state, interrupt state, and
+  `waiting_nop` state at notification raise time. The knob is
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT`. These markers are diagnostic only
+  and must not satisfy B6 by themselves.
+- The PGRAPH notify-clear path emits bounded
+  `BOOT_MARK b6 pgraph=notify-clear ...` diagnostics when the guest clears a
+  notify-error condition through `NV_PGRAPH_INTR`. The marker records before
+  and after pending bits, wait flags, PFIFO DMA state, trapped data, and
+  PMC/PFIFO/PCRTC state. The knob is
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_CLEAR_LIMIT`, falling back to
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT` when unset. These markers are
+  diagnostic only and must not satisfy B6 by themselves.
+- The NV2A aggregate IRQ line path emits bounded
+  `BOOT_MARK b6 nv2a=irq-line ...` diagnostics. The total knob is
+  `XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LIMIT`; low-priority PCRTC/PMC/idle samples are
+  separately capped by `XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LOW_PRIORITY_LIMIT` so late
+  PGRAPH/PFIFO transitions remain visible. These markers are diagnostic only
+  and must not satisfy B6 by themselves.
+- The NV2A PFIFO path emits bounded
+  `BOOT_MARK b6 pfifo=progress ...` diagnostics after `dashboard=xbe-loaded`
+  and before accepted `dashboard=xbe-executed` evidence. The knob is
+  `XEMU_BOOT_TRACE_NV2A_PFIFO_LIMIT`. The marker summarizes pusher/puller
+  progress, method entries, waiting flags, FIFO access, and PMC/PGRAPH state.
+  These markers are diagnostic only and must not satisfy B6 by themselves.
+- The NV2A PGRAPH path emits bounded
+  `BOOT_MARK b6 pgraph=method ...` diagnostics after dashboard DMA/header
+  observation and before accepted `dashboard=xbe-executed` evidence. The knob
+  is `XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_LIMIT`. The marker summarizes method
+  enter/exit/unhandled phases, method metadata, interrupt state, wait flags,
+  context state, surface state, trap state, and PMC state. These markers are
+  diagnostic only and must not satisfy B6 by themselves.
+- `accel/tcg/cpu-exec.c` also calls
+  `xemu_xbe_boot_trace_observe_exec(..., "tcg-tb")` for translated block
+  execution PCs in native Xbox and browser-boot builds, so execution detection
+  is no longer dependent only on the coarse timeout-loop CPU PC sample.
+- `ui/xemu-headless.c` polls the XBE probe from the shared native/wasm/browser
+  timeout loop under the main loop lock, so native and browser runs get the
+  same B6 loaded/executed marker behavior.
+- The generic XBE loaded/executed markers include a boot trace context from
+  `XEMU_BOOT_TRACE_CONTEXT` or a small `boot_trace_context.txt` file in the
+  mounted fixture/smoke path; browser runtime passes `context=browser-runtime`,
+  native smoke passes `context=native-headless`, and the Node block bridge
+  passes `context=browser-block-callback`.
+- `hw/ide/core.c` emits bounded guest logical HDD sector read markers before
+  block backends translate them to host/qcow2 offsets. The read limit is
+  controlled by `XEMU_BOOT_TRACE_IDE_READ_LIMIT` and defaults to 512 reads.
+- `block/file-posix.c` and `browser/xbox-boot/worker.js` are still useful for
+  proving browser-side bytes were served, but their offsets can be qcow2/host
+  file offsets. Use IDE guest LBA evidence plus a FATX file map for
+  `BOOT_MARK b6 dashboard=xbe-read context=browser-runtime file=xboxdash.xbe ...`.
+- `scripts/xbox-dashboard-xbe-read-evidence.py` maps HDD images through FATX,
+  finds dashboard XBE candidates such as `xboxdash.xbe`, and emits
+  `BOOT_MARK b6 dashboard=xbe-read ... source=ide-read-log` when a guest-LBA
+  read overlaps the dashboard file. It labels each match with a context such as
+  `native-headless`, `wasm-node-headless`, or `browser-runtime`.
+- Current real evidence shows `xboxdash.xbe` at `start_lba=4609192`. Native
+  headless overlaps that file at `read_lba=4609192`, and the standard real
+  matrix plus the Firefox BiDi IDE-poll diagnostic now overlap the same file in
+  `context=browser-runtime` at read index 20.
+- Historical browser-runtime probes before the IDE AIO-poll fix stalled after
+  the first IDE HDD read at `read_lba=3`, while native immediately continued
+  to FATX at `read_lba=4609024` and `xboxdash.xbe` at `read_lba=4609192`.
+  Keep those logs as regression evidence, not as the current blocker.
+- Use Firefox BiDi as the current practical long-run browser-runtime probe
+  while keeping Playwright support for browser automation and future
+  reference-frame work.
+- `scripts/xbox-browser-runtime-smoke.sh` can now select the Playwright engine
+  with `XEMU_BROWSER_RUNTIME_BROWSER=chromium` or `firefox`. Synthetic
+  Playwright Chromium and Firefox runs pass on this machine.
+- A real selected-assets Playwright Firefox probe
+  (`build-real-b3-matrix/browser-runtime-playwright-firefox.log`) passes the
+  browser runtime smoke and browser-block B3 requirement, but within a 60
+  second boot window it does not reach B4 display capture or any IDE
+  guest-LBA markers. Keep Firefox BiDi as the practical long-run probe until
+  Playwright Firefox catches up.
+- Deeper B3/B6 DMA diagnostics showed the first browser-runtime IDE DMA read
+  was submitted and the browser block backend returned bytes for the real HDD,
+  but the block AIO/DMA completion callback did not fire afterward. The fix is
+  to poll the current AIO context after IDE stores the returned DMA AIOCB, not
+  immediately inside the lower-level DMA helper before IDE owns the AIOCB.
+- Current browser-runtime storage evidence has advanced past that stall:
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-ide-poll.log` reaches
+  dashboard reads, including `read_lba=4609192` for `xboxdash.xbe`. The
+  correlator emits
+  `BOOT_MARK b6 dashboard=xbe-read context=browser-runtime ...`, and the
+  standard matrix log still fails the B6 loaded checker at
+  `missing-xbe-loaded-marker`; the newer focused artifact below advances past
+  that boundary.
+- A 60s native diagnostic from `build-docker-b6-xbe-scan`
+  (`build-real-b3-matrix/native-60s-xbe-scan/boot-smoke.log`) also reads
+  `xboxdash.xbe` but emitted no `dashboard=xbe-loaded`/`dashboard=xbe-executed`
+  before the read-progress hook was added.
+- A newer focused native diagnostic
+  (`build-real-b3-matrix/native-60s-xbe-dma-buffer/boot-smoke.log`) emits
+  `BOOT_MARK b6 dashboard=xbe-dma-buffer ... source=ide-dma-buffer` for the
+  first dashboard read. It proves the `xboxdash.xbe` header reaches guest IDE
+  DMA memory at `sg_addr=0x000be000`, with `image_base=0x00010000`, but it is
+  diagnostic only. It does not replace `dashboard=xbe-loaded
+  source=virtual-header` or `dashboard=xbe-executed`.
+- The current focused Firefox BiDi browser-runtime diagnostic
+  (`build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-page-probe-combined.log`)
+  now contains browser-runtime `xboxdash.xbe` read proof plus
+  `dashboard=xbe-dma-buffer` and `dashboard=xbe-virtual-probe
+  context=browser-runtime status=unmapped page_status=pde-not-present
+  guest_addr=0x00010000 cr3=0x0000f000 pde_addr=0x0000f000
+  pde=0x0000000000000000 guest_pc=0x80024307`. The native focused
+  counterpart (`build-real-b3-matrix/native-60s-xbe-page-probe/boot-smoke.log`)
+  reports the same `page_status=pde-not-present` boundary with
+  `guest_pc=0x8001bd07`. The combined browser log correctly fails the B6
+  loaded checker at `missing-xbe-loaded-marker`.
+- The latest focused Firefox BiDi browser-runtime diagnostic
+  (`build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-read-progress-loaded-combined.log`)
+  shows that the mapping appears on the next dashboard read:
+  `dashboard=xbe-read-progress ... status=xbeh-present page_status=mapped-page
+  phys_addr=0x000e0000`, followed by
+  `dashboard=xbe-loaded context=browser-runtime guest_addr=0x00010000
+  source=virtual-header`. The B6 checker now fails this combined log at
+  `missing-xbe-executed-marker`, which is the current boundary. The native
+  counterpart
+  (`build-real-b3-matrix/native-60s-xbe-read-progress-loaded/boot-smoke.log`)
+  also emits `dashboard=xbe-loaded context=native-headless` but no
+  `dashboard=xbe-executed`.
+- A newer native run after adding the TCG translated-block execution hook
+  (`build-real-b3-matrix/native-60s-xbe-tcg-exec/boot-smoke.log`) still emits
+  `dashboard=xbe-loaded context=native-headless` but no
+  `dashboard=xbe-executed`. That keeps the active B6 blocker at execution
+  observation or control-flow into the loaded dashboard XBE image range, not
+  just browser-runtime behavior.
+- The latest native exec-probe diagnostic
+  (`build-real-b3-matrix/native-60s-xbe-exec-probe-cpu-context/boot-smoke.log`)
+  includes high-alias physical verification and CPU-context fields in the
+  execution detector, and emits periodic `dashboard=xbe-exec-probe` samples
+  through `observed_tbs=310000`. The probe now logs `address_mode`,
+  `guest_phys`, `image_phys`, `phys_match`, `cpu_mode`, `cpl`, segment
+  selectors, registers, and control registers. Sampled high aliases that
+  overlap the XBE virtual range map to different physical pages than the loaded
+  dashboard image (`address_mode=high-alias-mismatch phys_match=no`), every
+  sampled TB remains `cpu_mode=protected32 cpl=0 cs=0x0008`, and no
+  `dashboard=xbe-executed` marker appears.
+- The latest Firefox BiDi browser-runtime exec-probe diagnostic
+  (`build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-exec-probe-cpu-context-combined.log`)
+  proves browser-runtime `xboxdash.xbe` read plus
+  `dashboard=xbe-loaded context=browser-runtime`, emits
+  `dashboard=xbe-exec-probe context=browser-runtime` with phys-map and
+  CPU-context fields through `observed_tbs=200000`, and correctly fails the B6
+  checker at `missing-xbe-executed-marker`. Early high-alias samples overlap the
+  XBE virtual range while the image alias is not yet mapped; later samples are
+  outside the dashboard XBE alias range. Every sampled browser TB also remains
+  `cpu_mode=protected32 cpl=0 cs=0x0008`.
+- The latest ret-target execution diagnostics add bounded code-site hashes,
+  opcode/modrm fields, branch kind, and readable return/direct/register branch
+  targets to `dashboard=xbe-exec-probe` without dumping raw code bytes. Native
+  `build-real-b3-matrix/native-60s-xbe-exec-ret-target-probe/boot-smoke.log`
+  shows sampled `ret` sites returning to `0x80030e84`; browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-exec-ret-target-probe-combined.log`
+  shows sampled returns targeting kernel high aliases such as `0x8001ae75` and
+  `0x8001a429`. These targets remain `branch_relation=above` and do not
+  physically match the loaded dashboard image. The browser combined log still
+  proves `xboxdash.xbe` read/load and still fails the B6 checker at
+  `missing-xbe-executed-marker`.
+- The latest post-TB transition diagnostics add
+  `dashboard=xbe-exec-transition` after translated blocks execute. Native
+  `build-real-b3-matrix/native-60s-xbe-exec-transition-probe/boot-smoke.log`
+  and browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-exec-transition-probe-combined.log`
+  sample the synchronized next PC and can emit `dashboard=xbe-executed` if that
+  next PC reaches the loaded dashboard image. Current native next PCs still
+  cycle through kernel locations such as `0x80030e84`, `0x80014f32`, and
+  `0x800426d4`; browser next PCs still cycle through kernel locations such as
+  `0x8002430e`, `0x8001ae75`, `0x80060ffe`, and `0x80014fb4`. No post-TB next
+  PC physically matches the loaded dashboard image, and the browser combined
+  log still fails the B6 checker at `missing-xbe-executed-marker`.
+- The latest transition-edge diagnostics add bounded
+  `dashboard=xbe-exec-edge` summaries after translated blocks. The native
+  artifact is
+  `build-real-b3-matrix/native-60s-xbe-exec-edge-probe/boot-smoke.log`, and the
+  browser artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-exec-edge-probe-combined.log`.
+  The browser run proves selected-assets runtime, browser-block B3, B4 display
+  capture, `xboxdash.xbe` read, and `dashboard=xbe-loaded`, emits 64 edge
+  samples, and still fails the B6 checker at
+  `missing-xbe-executed-marker`. Repeated browser edges remain in
+  kernel/high-alias paths such as `0x80014159 -> 0x80014386`,
+  `0x8004cdb8 -> 0x80014fb4`, and `0x80014fb4 -> 0x8001aea5`; none physically
+  match the loaded dashboard image.
+- The latest branch-target diagnostics widen the retained edge cache to 64
+  unique edge shapes and decode register plus memory-indirect `FF /2` and
+  `FF /4` call/jmp operands in edge samples. Native
+  `build-real-b3-matrix/native-60s-xbe-branch-target-classification/boot-smoke.log` and
+  browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-branch-target-classification-combined.log`
+  both resolve a memory-indirect `call-mem32` through operand address
+  `0x8003ad24` to target `0x800241fe`; the browser wide-edge run also records
+  `call-reg` dispatch to `0x80046280`. Transition and edge logs now add
+  `next_branch_relation`, `next_branch_address_mode`, physical mapping fields,
+  and `next_branch_phys_match` for decoded branch targets. The new browser log
+  shows sampled branch targets are still kernel/high-alias targets
+  (`next_branch_relation=above`, `next_branch_address_mode=high-alias-mismatch`
+  or `none`, and no physical match to the loaded dashboard image), not
+  dashboard XBE execution. The browser combined log proves browser-runtime
+  `xboxdash.xbe` read, B4 display capture, B5 runtime evidence, and
+  `dashboard=xbe-loaded`, but still fails the B6 checker at
+  `missing-xbe-executed-marker`.
+- The latest entry-point diagnostics prove the decoded dashboard entry becomes
+  readable in both native and browser-runtime contexts. Native
+  `build-real-b3-matrix/native-60s-xbe-entry-probe-v2/boot-smoke.log` and
+  browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-entry-probe-combined.log`
+  both probe decoded dashboard entry `0x00017d60`, first emitting
+  `dashboard=xbe-entry-probe ... status=unreadable` while the entry code is not
+  mapped, then one `status=ready` marker with `entry_phys=0x000c7d60`,
+  `entry_code_hash=0x7cbb4e8a328f1553`, and `entry_opcode=0x55`. The browser
+  artifact passes B4 display capture, B5 runtime evidence, and browser-runtime
+  `xboxdash.xbe` read correlation, but the combined log still fails the B6
+  checker at `missing-xbe-executed-marker`. Entry readiness narrows the handoff
+  window without completing B6.
+- The latest entry-target diagnostics add bounded probes for branch targets
+  near the decoded dashboard entry point. Native
+  `build-real-b3-matrix/native-60s-xbe-entry-target-probe/boot-smoke.log` and
+  browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-entry-target-probe-combined.log`
+  both emit 16 `dashboard=xbe-entry-target-probe` markers. The browser artifact
+  passes B4 display capture, B5 runtime evidence, and browser-runtime
+  `xboxdash.xbe` read correlation, but still fails the B6 checker at
+  `missing-xbe-executed-marker`. The sampled near-entry targets remain
+  kernel/high-alias paths with `target_status=near-phys-unknown`, including
+  ret-stack targets near `0x8001ae75` and call targets near `0x80018d30` or
+  `0x800241fe`; none prove dispatch into the loaded dashboard image. The fresh
+  target-hash-v1 browser artifact includes `target_code_hash` and
+  `target_image_code_hash` on all 16 sampled entry-target markers, and the hash
+  audit reports `target_disk_hash_match=0`, so decoded target bytes can be
+  checked against the dashboard file without exposing proprietary bytes.
+- The latest dispatch diagnostics inspect post-load register and top-stack
+  candidates without dumping raw stack contents. Native
+  `build-real-b3-matrix/native-60s-xbe-dispatch-probe-v3/boot-smoke.log` emits
+  16 `dashboard=xbe-dispatch-probe` markers, and browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-xbe-dispatch-probe-v3-combined.log`
+  emits 10. Both keep `reg_phys_match_count=0` and
+  `reg_entry_near_count=0`; the browser probes keep `reg_first_candidate=none`
+  throughout. The only native register candidate is a high-alias mismatch
+  (`ecx=0x8003a950`) above the dashboard image, not execution. Stack direct
+  matches, when present, point into XBE headers (`stack_first_in_headers=yes`);
+  other stack candidates are high-alias mismatches or unknown physical mappings
+  near kernel paths such as `0x8001ae75`, `0x8001a429`, and `0x800141bb`. The
+  browser artifact passes B4 display capture, B5 runtime evidence, and
+  browser-runtime `xboxdash.xbe` read correlation, but still fails the B6
+  checker at `missing-xbe-executed-marker`.
+- The latest PFIFO/NV2A/PGRAPH diagnostics add bounded `pfifo=progress`
+  markers, divergence-window `pfifo=window` markers controlled by
+  `XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_START` and
+  `XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_LIMIT`, bounded `pgraph=method` markers,
+  divergence-window `pgraph=method-window` markers controlled by
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_START` and
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_LIMIT`, bounded
+  `pgraph=notify-error` markers controlled by
+  `XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT`, bounded `pgraph=notify-clear`
+  markers controlled by `XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_CLEAR_LIMIT`,
+  filtered `nv2a=irq-source` markers, bounded `nv2a=irq-line` markers, a
+  separate non-priority IRQ-line cap controlled by
+  `XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LOW_PRIORITY_LIMIT`, earlier
+  `nv2a=pmc-access` markers, and diagnostic-only `nv2a_wait_*` fields on
+  kernel-loop probes. Native
+  `build-real-b3-matrix/native-120s-command-window-null-flip-probe/boot-smoke.log`
+  and browser
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-command-window-v2-combined.log`
+  both still show post-load execution remains in kernel/high-alias paths, but
+  now narrow the device-side gap beyond notify clearing and the late graphics
+  command window. The null-renderer flip-stall mismatch is fixed: native and
+  browser both continue past `NV097_FLIP_STALL`, consume the late command
+  window through `NV097_SET_COLOR_CLEAR_VALUE`, and reach PFIFO empty with
+  `dma_get=dma_put=0x03881318` and `waiting_flip=no`. The Firefox BiDi browser
+  artifact passes B4 display capture, B5 runtime evidence, browser-runtime
+  `xboxdash.xbe` read correlation, alias hash audit, entry-ready evidence, and
+  command-stream alignment, but still fails the B6 checker at
+  `missing-xbe-executed-marker`. The command-window comparator reports
+  `command_stream_aligned=yes divergence=post-command-loop-mismatch`. The
+  command-window post-command CPU/XBE handoff comparator reports both sides
+  entry-ready and stream-idle, but `any_handoff_candidate=no`: no sampled native
+  or browser execution probe or transition next-PC physically matches the loaded
+  dashboard image. The command-window loop-cluster report adds ordering-aware
+  after-idle fields: native still reaches PFIFO empty and then a post-idle
+  loop with `pmc_enabled=0x00000001`, while that browser after-idle
+  probes reach a different kernel/high-alias loop around
+  `0x80044feb -> 0x80044fff`. That post-command IRQ/PMC comparator reports
+  `divergence=browser-pmc-disabled-after-idle`: native keeps PMC enabled after
+  an enable write from `eip=0x80046318`, while browser repeatedly disables
+  `NV_PMC_INTR_EN_0` from `eip=0x80045ba1` and then samples the post-idle loop
+  with `pmc_enabled=0x00000000` while PCRTC vblank raise/clear activity
+  continues. That PCRTC vblank divergence helper reports
+  `divergence=browser-initial-pcrtc-pending`: native has no PCRTC vblank raises
+  in the paired headless log and all PMC disables are PGRAPH-driven, while the
+  browser starts with `pcrtc_pending_before=0x00000001`, records 62 PCRTC
+  vblank raises, and records 70 PCRTC-driven PMC disables. No run has produced
+  a `dashboard=xbe-executed` marker.
+- Browser-only PCRTC vblank cadence is now controllable for diagnostics with
+  `XEMU_BROWSER_BOOT_PCRTC_VBLANK_MODE=normal|off|suppress-until-dashboard-observed|suppress-until-entry-ready`.
+  The page/worker path writes the selected mode into the wasm fixture
+  filesystem, so the C-side browser build does not rely only on host
+  `getenv()` propagation. Non-normal modes emit sampled
+  `BOOT_MARK b6 nv2a=pcrtc-vblank-gate ...` markers and are diagnostic only:
+  they must not satisfy B6 without real `dashboard=xbe-executed` and native
+  reference-frame match evidence.
+- The focused Firefox BiDi run
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pcrtc-vblank-off-v1-combined.log`
+  used `XEMU_BROWSER_BOOT_PCRTC_VBLANK_MODE=off`. It proves the diagnostic
+  reached wasm, emits vblank-gate suppress markers, keeps B4 display capture
+  and B5 runtime evidence, and still proves browser-runtime `xboxdash.xbe`
+  read/load plus entry-ready evidence. Against
+  `build-real-b3-matrix/native-120s-pmc-cpu-context-v1/boot-smoke.log`, the
+  PCRTC comparator now reports `divergence=same-pcrtc-vblank-shape`, the
+  PGRAPH comparator still reports `command_stream_aligned=yes`, and the IRQ/PMC
+  comparator reports matching loop PMC pending/enabled state. The latest
+  IRQ-watch serviceable idle-loop diagnostic
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-irq-watch-route-v3-combined.log`
+  runs with `XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE=idle-loop-serviceable`
+  and `XEMU_BOOT_TRACE_XBE_IRQ_WATCH=6,12`.
+  It proves browser-runtime `xboxdash.xbe` read/load/entry-ready, keeps B4/B5
+  evidence, and moves the first browser hard IRQ to the same serviceable idle
+  PC as native, `0x8001b030`, with interrupts enabled and no IRQ inhibition.
+  It still emits no `dashboard=xbe-executed` marker, so B6 remains incomplete.
+  The remaining divergence is post-idle CPU flow:
+  `scripts/xbox-post-idle-interrupt-flow-compare.py` reports
+  `divergence=browser-extra-interrupt-vector` with
+  `browser_extra_pic_line_assert_irqs=12,6`,
+  `browser_extra_lpc_route_assert_irqs=12,6`, and
+  `browser_extra_pic_ack_vectors=0x3c,0x36`; the first vector `0x30` service
+  reaches handler PC `0x80030e4c` in both native and browser, but browser then
+  asserts/routes extra IRQs and records a different first post-service loop
+  edge. The native reference
+  `build-real-b3-matrix/native-120s-irq-watch-route-v1/boot-smoke.log` shows
+  native PIC ack sampling stays on vector `0x30` and has no matching LPC route
+  or PIC line assertion. The browser source markers show `0x3c` is ACPI PM
+  routed to guest IRQ 12 through slave IRQ 4, while `0x36` is MCPX ACI routed
+  to master IRQ 6. Both assertions occur at `eip=0x8001b030` after PFIFO
+  reaches pusher-empty.
+- The timer-pump attribution diagnostic
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-timer-pump-attribution-v2.log`
+  is diagnostic-only because it times out and lacks the full combined B6 read
+  evidence, but it proves the browser-only PM/AC97 source events fire inside
+  the browser TCG-side virtual timer pump: the comparator reports
+  `browser_pm_timer_pump_active_events=1`,
+  `browser_ac97_callback_pump_active_events=9`,
+  `browser_ac97_transfer_pump_active_events=1`, and
+  `browser_ac97_irq_pump_active_events=1`, while guest cleanup writes such as
+  PM event writes and AC97 bus-master writes are pump-inactive. The next
+  technical slice is therefore to make browser timer progression match the
+  native main-loop timer boundary, or filter the diagnostic pump so it does not
+  run unrelated PM timer and AC97 playback callbacks while trying to deliver
+  the native PIT service point. This must remain diagnostic-only until it
+  produces real `dashboard=xbe-executed` evidence.
+- The PIT-only timer-pump diagnostic
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-only-pump-v1.log` adds
+  `XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE=idle-loop-serviceable-pit-only`,
+  tags the PIT timer as pump-eligible, and filters the browser pump to that
+  timer. Native and wasm builds passed with this change. The focused comparator
+  reports `browser_extra_vectors=none`, `browser_extra_pic_ack_vectors=none`,
+  no extra PIC/LPC assertions, and zero PM/AC97 callback/source events, while
+  the first hard-IRQ service and first IRET match native. This artifact still
+  times out and is diagnostic-only, but it moves the live B6 boundary from
+  PM/AC97 timer-pump noise to CPU-flow parity after the native-matching
+  PIT/vector `0x30` service.
+- The post-idle PIT-gate diagnostics
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-pump-v1.log`
+  and
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-full-pump-v1.log`
+  add `XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE=pit-after-idle` and
+  `pit-after-idle-full`. The full-idle mode waits for the complete
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT` sample budget before the
+  PIT-only pump. It still times out without `dashboard=xbe-executed`, but the
+  comparator keeps `browser_extra_vectors=none`, preserves native-matching
+  first hard-IRQ service plus first IRET, and removes the earlier
+  browser-only first post-service loop (`browser_first_post_service_loop=none`).
+  The remaining mismatch is at the PFIFO stream-idle boundary: native's first
+  stream-idle loop sample starts `0x8001b030 -> 0x8001b02f`, while browser's
+  first stream-idle loop sample starts `0x8001b02f -> 0x8001b030`.
+- The PFIFO stream-idle boundary diagnostic adds a bounded
+  `BOOT_MARK b6 pfifo=stream-idle-boundary ...` marker at the first PFIFO
+  `pusher-empty` snapshot and compares native/browser CPU context plus the
+  latest translated-block transition with
+  `scripts/xbox-pfifo-stream-idle-boundary-compare.py`. Native and wasm builds
+  passed with this change. The fresh artifacts are
+  `build-real-b3-matrix/native-pfifo-boundary-v1/boot-smoke.log` and
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-boundary-pit-after-idle-full-v1.log`.
+  The comparator reports `divergence=boundary-cpu-state-mismatch`: native's
+  first PFIFO-empty boundary is at `eip=0x80042910` with last transition
+  `0x800426de -> 0x80042910`, while browser's first PFIFO-empty boundary is
+  already at `eip=0x8001b030` with last transition
+  `0x8001b030 -> 0x8001b02f`. The browser runtime still times out and emits no
+  `dashboard=xbe-executed`, so this remains diagnostic-only evidence.
+- The PFIFO stream-idle transition diagnostic adds a bounded
+  `BOOT_MARK b6 pfifo=stream-idle-transition ...` marker at the final
+  `DMA_GET` commit into empty, before the later `pusher-empty` boundary. Fresh
+  artifacts are `build-real-b3-matrix/native-pfifo-activity-v1/boot-smoke.log`
+  and
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-activity-v1.log`.
+  Native and wasm builds passed with this change, and both sides emit the
+  marker for the same final command: `dma_get_before=0x03881314`,
+  `dma_get_after=0x03881318`, `dma_put=0x03881318`, `method=0x1d90`, and
+  `processed=1`. The comparator reports
+  `divergence=transition-cpu-state-mismatch`: native and browser commit the
+  same final PFIFO command from the same CPU edge, but native has
+  `cpu_interrupt_request=0x00000002` while browser has
+  `cpu_interrupt_request=0x00000000`. This remains diagnostic-only evidence
+  because the browser runtime still times out and emits no
+  `dashboard=xbe-executed`.
+- The `pit-after-pfifo-transition` diagnostic adds a focused browser timer-pump
+  mode that waits until the exact `pfifo=stream-idle-transition` marker before
+  allowing the PIT-only pump. The fresh artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-transition-pit-at-transition-v1.log`.
+  It still times out without `dashboard=xbe-executed`, but it proves this later
+  gate is not enough: PM/AC97 noise and extra vectors stay absent, yet browser
+  still reaches the transition without the native pending hard IRQ and sets it
+  later from the TCG-side timer pump. The next slice is IRQ/timer scheduling at
+  the final PFIFO transition, not more PIT pump timing.
+- The `pit-before-pfifo-transition` gate diagnostic adds
+  `BOOT_MARK b6 tcg=timer-pump-gate ...`, controlled by
+  `XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_GATE_LIMIT`. The focused gate-only
+  artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-before-transition-v3.log`.
+  It proves the idle-PC-only pre-transition gate can miss the last command
+  window when the browser reaches the near-final PFIFO activity while the CPU is
+  still at `0x800426de`.
+- The `pit-before-pfifo-transition-activity` diagnostic loosens the
+  pre-transition gate to near-final PFIFO activity and remains PIT-only. The
+  focused artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-before-transition-activity-v1.log`.
+  It proves the early activity gate is also not the fix: the pump sets
+  `CPU_INTERRUPT_HARD` before PFIFO empties, but the browser CPU accepts vector
+  `0x30` and reaches handler PC `0x80030e4c` before the final
+  `pfifo=stream-idle-transition`. The remaining ordering target is between the
+  too-late post-transition pump and the too-early activity-gated pump: match
+  native's state where the IRQ is pending at the final PFIFO commit and is
+  serviced after that commit.
+- The `pit-before-pfifo-transition-activity-defer-to-idle` diagnostic defers
+  hard-IRQ service after the PIT pump until the browser reaches the native
+  serviceable idle PC. The fresh artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-defer-to-idle-v1.log`.
+  Native and wasm builds passed, and the browser runtime still passes B5 while
+  timing out without `dashboard=xbe-executed`. This run proves useful progress:
+  browser keeps `CPU_INTERRUPT_HARD` pending through the post-PFIFO handoff and
+  services vector `0x30` at `eip=0x8001b030`, with the same service/IRET frame
+  hash as native. It still does not satisfy B6. The remaining mismatch is
+  earlier than hard-IRQ service: native already has `CPU_INTERRUPT_HARD` pending
+  at the final PFIFO transition, while browser sets it later from the TCG-side
+  PIT pump.
+- The `pit-at-pfifo-transition-pre-commit-defer-to-idle` diagnostic runs a
+  one-shot PIT-only pump at the final PFIFO DMA GET pre-commit point, taking BQL
+  for the PIT callback and reacquiring the PFIFO lock before the pusher commits
+  the final `DMA_GET`. The fresh artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-pre-commit-pit-v2.log`.
+  Native and wasm builds passed. The first attempt without BQL correctly
+  aborted at `cpu_interrupt: assertion failed: (bql_locked())`, proving the
+  PIT callback must run under BQL; the v2 artifact fixes that. This is still
+  diagnostic-only and times out without `dashboard=xbe-executed`, but it moves
+  the boundary forward: browser now reaches the final
+  `pfifo=stream-idle-transition` with `cpu_interrupt_request=0x00000002`
+  pending, matching native's pending hard IRQ at that point. The browser also
+  services vector `0x30` at `0x8001b030`, and the first service/IRET frame hash
+  still matches native. The remaining mismatch is now after the first service:
+  browser records a post-service loop edge `0x80030e4c -> 0x80014f2d`, while
+  the compact native reference flow records the IRET marker first and continues
+  through repeated PIT vector `0x30` services.
+- The idle-before-PFIFO-transition diagnostic adds
+  `BOOT_MARK b6 cpu=idle-before-pfifo-transition ...`, controlled by
+  `XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT`, and the helper
+  `scripts/xbox-idle-before-pfifo-transition-compare.py`. The focused artifacts
+  are
+  `build-real-b3-matrix/native-pfifo-activity-v1/boot-smoke.log`
+  and
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pfifo-activity-v1.log`.
+  The comparator now reports both markers present with
+  `divergence=idle-before-transition-mismatch`, superseding the older
+  `browser-idle-before-transition-only` result. Native and browser both reach
+  the same idle edge, `0x8001b02e -> 0x8001b02f`, while PFIFO still has
+  `dma_get=0x0388130c`, `dma_put=0x03881318`, and 12 bytes left to consume.
+  The diagnostic PFIFO activity snapshot also aligns:
+  `pfifo_activity_phase=puller-method-pgraph-return`,
+  `pfifo_activity_pfifo_lock_released=yes`,
+  `pfifo_activity_pgraph_locked=yes`, and
+  `pfifo_activity_final_transition_candidate=no`. This rules out a
+  PFIFO/PGRAPH activity-phase mismatch for the older `pfifo-activity-v1`
+  baseline artifact. In that baseline, the split is hard-IRQ/timer scheduling at
+  the following stream-idle transition: native has `CPU_INTERRUPT_HARD` pending
+  at the final PFIFO command commit, while browser does not until later
+  TCG-side timer pumping. The newer PFIFO pre-commit PIT artifact moves past
+  that specific split and leaves post-service loop flow as the front-most
+  diagnostic mismatch.
+- The PFIFO-transition IRQ timing diagnostic adds
+  `scripts/xbox-pfifo-transition-irq-timing.py`, which summarizes the first
+  PIT/timer, hard-IRQ set/reset, PIC ack, and hard-IRQ service markers around
+  the final `pfifo=stream-idle-transition`. On the current `pfifo-activity-v1`
+  logs it reports `divergence=transition-pending-irq-mismatch`: native reaches
+  the transition with `native_transition_irq=0x00000002`, while browser reaches
+  it with `browser_transition_irq=0x00000000`; browser's first hard-IRQ set
+  happens later after the `tcg=timer-pump` marker. This helper is
+  diagnostic-only and must not satisfy B6.
+- The fresh native post-IRET flow reference is
+  `build-real-b3-matrix/native-post-iret-flow-v1/boot-smoke.log`. It extends
+  the native after-idle loop budget to 128 samples and records repeated PIT
+  vector `0x30` service after PFIFO pusher-empty. Compared with the useful
+  browser PFIFO-empty artifact
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-full-pump-timeout-300s-v1-combined.log`,
+  `scripts/xbox-iret-frame-compare.py` reports `divergence=none`: native and
+  browser have the same preferred handler PC `0x80030e4c`, return PC
+  `0x8001b030`, IRET-after ESP `0x800395f0`, flags, and stack hash
+  `0x455d94af83816994`. `scripts/xbox-post-command-loop-clusters.py` now
+  reports `browser_stream_idle_seen=yes`, `after_idle_divergence=edge-mismatch`,
+  and `after_idle_cpu_interrupt_divergence=native-only-after-idle-cpu-interrupt`
+  for that pair.
+  This was an older front-most B6 split: the useful browser artifact matches
+  the native interrupt-return frame and reaches PFIFO pusher-empty with combined
+  dashboard read/load/entry-ready evidence, but does not produce the matching
+  after-idle CPU interrupt evidence and still does not emit
+  `dashboard=xbe-executed`.
+- The browser harness now forwards diagnostic kernel-loop controls into the
+  wasm fixture filesystem:
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT`,
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT`, and
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS`. The C-side probe reads those
+  fixture settings in browser runs. This is long-term useful, but the focused
+  v4 run
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v4.log`
+  is a negative diagnostic: it passes browser runtime evidence again, but does
+  not reach PFIFO stream-idle and the comparators report browser
+  `stream_idle_seen=no`, `browser-no-after-idle-loop-samples`, and
+  `command-stream-not-idle`. Keep
+  `pit-after-idle-full-pump-v1.log` as the useful PFIFO-empty browser
+  reference until the trace controls can enlarge only the after-idle window
+  without re-sampling earlier PGRAPH interrupt-enable wait state.
+- The next trace-control fix now separates the after-idle kernel-loop sample
+  budget from the browser PIT-pump after-idle gate. Keep
+  `XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT` for sample/logging budget,
+  and use `XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_AFTER_IDLE_LIMIT` for the
+  `idle-loop-serviceable-pit-after-idle-full` pump threshold. The focused v5
+  run
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5.log`
+  passes B4 display capture and B5 browser runtime evidence, proves partial
+  browser-runtime dashboard XBE read/load/entry-ready progress, and the
+  combined v5 artifact
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5-combined.log`
+  appends FATX/IDE read evidence with
+  `scripts/xbox-combine-dashboard-xbe-read-evidence.sh`. The raw C
+  read-progress marker reports `contiguous_bytes=172032` versus
+  `image_size=175080`; the FATX correlator proves `xboxdash.xbe` file size is
+  `172032`, while `image_size` is the XBE in-memory image size. The combined
+  log therefore passes the read/load/entry-ready side and correctly fails the
+  B6 checker at `missing-xbe-executed-marker`. It still has no browser PFIFO
+  stream-idle and no native visual-reference match. Treat this as forward
+  progress on the B6 evidence boundary, not completion.
+- The stable B5-pass/read-proof browser artifact is
+  `build-real-b3-matrix/browser-runtime-firefox-bidi-section-map-v2-combined.log`.
+  It uses rebuilt wasm with XBE section-map diagnostics and appends FATX/IDE
+  dashboard-read proof with `scripts/xbox-combine-dashboard-xbe-read-evidence.sh`.
+  It passes B5 browser runtime evidence, passes B4 display capture evidence,
+  proves browser-runtime `xboxdash.xbe` read/load/entry-ready, emits
+  `dashboard=xbe-section-map phase=entry-ready`, maps executable entry section 3
+  from entry `0x00017d60` to `entry_phys=0x000c7d60`, and matches the native
+  preferred vector `0x30` service/IRET frame. It supersedes the older 300s,
+  `pit-after-idle-full-pump-v1.log`, and v5 combined logs as the B5-pass
+  dashboard-read baseline. It still does not complete B6 because
+  `scripts/xbox-dashboard-loaded-evidence-check.sh` correctly fails it at
+  `missing-xbe-executed-marker`; native dashboard reference capture and
+  browser-vs-native visual comparison remain blocked on real browser-runtime
+  `dashboard=xbe-executed`. Validate the section-map diagnostic with
+  `scripts/xbox-dashboard-section-map-evidence-check.sh build-real-b3-matrix/browser-runtime-firefox-bidi-section-map-v2-combined.log`.
+  These markers are metadata-only and must not satisfy B6 without
+  browser-runtime `dashboard=xbe-executed` plus native/browser dashboard
+  visual-match evidence.
+  The `dashboard=xbe-executed` marker is intentionally strict: it must carry
+  `phys_match=yes` and executable section metadata (`section_flags` containing
+  `0x4`), and `scripts/xbox-dashboard-loaded-evidence-check.sh` rejects weaker
+  executed markers.
+
+Historical B6 work queue snapshot:
+
+The current next actions, loop guards, and active artifact roles live in
+`goal.md`. The notes below are historical context and should not override
+`goal.md`.
+
+1. Finish the browser dashboard XBE execution proof. The section-map v2 combined
+   browser diagnostic reaches `dashboard=xbe-loaded`, an
+   entry-ready probe, an entry-ready section map, and browser-runtime FATX
+   `xboxdash.xbe` read evidence while preserving B4/B5 evidence. The current
+   checker failure is `missing-xbe-executed-marker`, not a read/load/runtime
+   failure. Continue using the section-map diagnostic to describe the loaded XBE
+   ranges and physical mappings, but do not treat it as dashboard execution.
+   The execution question remains: post-load execution stays in
+   protected-mode kernel TBs (`cpl=0 cs=0x0008`) after the dashboard XBE has
+   been mapped, loaded, and its decoded entry point has become readable. Start
+   from the PGRAPH PMC CPU-context and command-window probe logs plus the
+   dispatch,
+   entry-target, branch-target,
+   alias hash audit, and earlier memclass kernel-loop logs. PFIFO and PGRAPH
+   method progress now appears aligned in both native and browser, the stale
+   PGRAPH aggregate interrupt bit is fixed, both native and browser
+   notify-clear probes prove the notify wait state clears, and both sides now
+   reach PFIFO empty after the late command window. The PCRTC-off diagnostic
+   removes the browser-only vblank cadence as the immediate mismatch and leaves
+   matching loop PMC pending/enabled state, but it still does not produce
+   dashboard execution proof. The later serviceable idle-loop, PIT-only, and
+   post-idle PIT-gate artifacts progressively removed the older PM/AC97 noise,
+   extra vectors, transition pending-IRQ mismatch, and first IRET-frame
+   mismatch. The fresh native post-IRET reference plus the useful browser
+   `pit-after-idle-full-pump-v1` artifact now shows the preferred vector `0x30`
+   service/IRET frame and the after-idle top loop edge match. The next anchor is
+   narrower: native records after-idle CPU interrupt samples after PFIFO empty,
+   while browser does not, and neither side reaches physically matching
+   dashboard XBE execution. Use
+   `scripts/xbox-post-command-handoff-compare.py` on the paired native/browser
+   command-window logs to summarize whether any execution or transition probe
+   has become a physical dashboard-image match, and
+   `scripts/xbox-post-command-loop-clusters.py` to summarize native/browser loop
+   shapes, wait sources, and whether loop samples were captured after PFIFO
+   empty. Use `scripts/xbox-post-idle-interrupt-flow-compare.py` to summarize
+   vector, IRET, and post-service edge flow, then use
+   `scripts/xbox-post-command-irq-state-compare.py` and
+   `scripts/xbox-pcrtc-vblank-divergence.py` to summarize the post-idle NV2A
+   PMC/PCRTC divergence before changing renderer or dashboard completion logic.
+   The PIT-only timer-pump diagnostic now isolates that pump to the tagged PIT
+   timer and removes the browser-only PM/AC97 assertions without losing the
+   native-matching PIT/vector `0x30` service. The full post-idle PIT-gate
+   diagnostic also removes the earlier first post-service loop symptom. The
+   `pit-after-pfifo-transition` diagnostic proves that waiting until the final
+   PFIFO transition before pumping PIT removes PM/AC97 noise and extra vectors,
+   but browser still sets the hard IRQ later instead of matching native's
+   pending-hard-IRQ transition state. The activity-gated pre-transition
+   diagnostic proves the opposite side of the boundary: pumping at
+   `puller-method-pgraph-call` is too early because the browser services vector
+   `0x30` before the final PFIFO commit. The defer-to-idle diagnostic removes
+   the older first-service-frame mismatch by holding the pending hard IRQ until
+   `0x8001b030`; its first service and IRET frame now match native. The PFIFO
+   pre-commit PIT diagnostic then removes the pending-hard-IRQ transition
+   mismatch itself: browser and native now both have `CPU_INTERRUPT_HARD`
+   pending at the final `pfifo=stream-idle-transition`, and the first vector
+   `0x30` service frame still matches. The remaining technical slice is now
+   after-idle CPU interrupt progress after the first matching service: explain
+   why native records post-idle CPU interrupt samples and repeated PIT vector
+   `0x30` services while the useful browser artifact has no after-idle CPU
+   interrupt samples and times out without `dashboard=xbe-executed`. Native and
+   browser are already aligned
+   at `puller-method-pgraph-return`, at the final PFIFO transition's pending
+   IRQ state, and at the first service frame, so do not fall back to another
+   generic PFIFO/PGRAPH phase check, generic timer-pump mode, or renderer issue
+   unless fresh evidence moves this boundary. Use
+   `scripts/xbox-pfifo-transition-irq-timing.py` plus
+   `scripts/xbox-post-idle-interrupt-flow-compare.py` on the PFIFO activity,
+   pre-transition activity, defer-to-idle, and pre-commit PIT logs as the
+   compact pass/fail summary for that boundary. Do not repeat the v4 larger
+   early kernel-loop sampling run as the next step; it re-samples earlier PGRAPH
+   interrupt-enable wait state and misses PFIFO stream-idle.
+2. Preserve the standard real matrix with
+   `XEMU_REAL_B3_BROWSER_RUNTIME_DRIVER=firefox-bidi`; it is now the baseline
+   combined log containing browser-runtime `xboxdash.xbe` read proof.
+3. Keep Playwright as the preferred screenshot/canvas/reference-frame tooling,
+   using `XEMU_BROWSER_RUNTIME_BROWSER=chromium|firefox` to select engines.
+4. Keep Firefox BiDi as the long browser-runtime probe until Playwright Firefox
+   reaches comparable B4/IDE-read evidence.
+5. Treat
+   `dashboard=xbe-header-resident source=physical-scan`,
+   `dashboard=xbe-dma-buffer source=ide-dma-buffer`,
+   `dashboard=xbe-virtual-probe source=virtual-probe`, and
+   `dashboard=xbe-read-progress source=ide-dma-read-progress`,
+   `dashboard=xbe-exec-probe source=tcg-tb`, and
+   `dashboard=xbe-exec-transition source=tcg-tb-post`, and
+   `dashboard=xbe-exec-edge`, `dashboard=xbe-alias-compare`,
+   `dashboard=xbe-entry-probe`,
+   `dashboard=xbe-entry-target-probe`,
+   `dashboard=xbe-dispatch-probe`, and
+   `dashboard=kernel-loop-probe`, `nv2a=pmc-access`, `nv2a=irq-source`,
+   `nv2a=irq-line`, `pfifo=progress`, `pfifo=stream-idle-transition`,
+   `pfifo=stream-idle-boundary`, `pgraph=method`,
+   `pgraph=notify-error`, `pgraph=notify-clear`, and the `nv2a_wait_*` fields on
+   `dashboard=kernel-loop-probe` as diagnostic hints only.
+6. Add native reference-frame capture and browser-vs-native frame comparison
+   that emits `BROWSER_DASHBOARD_CAPTURE result=pass native_ref_match=yes ...`.
+
+## Browser Automation Tooling
+
+Preferred stack for visual/dashboard evidence:
+
+```sh
+hash -r
+export PATH="$HOME/.npm-global/bin:$PATH"
+export NODE_PATH="$(npm root -g)"
+node -e 'require("playwright"); console.log("playwright ok")'
+```
+
+Then run browser tests normally. On this machine Playwright is installed
+globally under `$HOME/.npm-global/lib/node_modules`, so `NODE_PATH` is needed
+for repo scripts that use `require("playwright")`. If the npm-global PATH was
+added to a shell startup file after the current terminal opened, run
+`source ~/.profile` or open a fresh shell before using the shorter interactive
+commands. Playwright browser binaries are installed in `~/.cache/ms-playwright`.
+
+Verified local sanity check on 2026-06-28 with the explicit unattended env
+prefix below: Node `v22.22.2`, npm `10.9.7`, global Playwright `1.61.1`, and
+browser binaries:
+
+- Chromium: `$HOME/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`
+- Firefox: `$HOME/.cache/ms-playwright/firefox-1532/firefox/firefox`
+- WebKit: `$HOME/.cache/ms-playwright/webkit-2311/pw_run.sh`
+
+Other verified local tools: Firefox `140.11.0esr`, Python `3.12.13`,
+`qemu-img` `10.1.0`, and Podman `5.8.2` through
+`/tmp/xemu-podman-wrapper/docker`.
+
+For unattended commands, avoid depending on shell startup files and prefix the
+command explicitly:
+
+```sh
+PATH=/tmp/xemu-podman-wrapper:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+NODE_PATH=$HOME/.npm-global/lib/node_modules \
+<command>
+```
+
+Browser wasm C-side `getenv()` does not reliably receive host
+`XEMU_BOOT_TRACE_*` values from the surrounding smoke command. For C-side
+browser diagnostics, prefer browser-specific compiled defaults or add explicit
+JS-to-wasm env plumbing before assuming a host env limit took effect.
+
+The local Docker command may be provided by the Podman wrapper at
+`/tmp/xemu-podman-wrapper/docker`. If synthetic matrix commands report
+`docker: command not found`, run:
+
+```sh
+export PATH="/tmp/xemu-podman-wrapper:$PATH"
+```
+
+Automation order:
+
+1. Use Playwright for new screenshot, canvas, and reference-frame tests; select
+   the engine with `XEMU_BROWSER_RUNTIME_BROWSER=chromium` or `firefox`.
+2. Keep the existing Firefox BiDi scripts as fallback when Playwright is
+   missing, `NODE_PATH` is not configured, or Playwright engine progress lags
+   the BiDi evidence.
+3. For current long real-matrix browser-runtime probes, force the practical
+   Firefox BiDi path with
+   `XEMU_REAL_B3_BROWSER_RUNTIME_DRIVER=firefox-bidi scripts/xbox-real-b3-matrix.sh`.
+4. Keep browser tests deterministic: write transcripts, frame hashes,
+   screenshots, and explicit `BOOT_MARK`/`BROWSER_*` evidence lines.
+
+Current local fixture exports for this machine:
+
+```sh
+export XEMU_MCPX='/home/sammy/Downloads/xemu/boot-rom-image/Boot ROM Image/mcpx_1.0.bin'
+export XEMU_FLASH='/home/sammy/Downloads/xemu/complex-4627v1.03/Complex_4627v1.03.bin'
+export XEMU_EEPROM=/tmp/xemu-b6-eeprom.bin
+export XEMU_HDD='/home/sammy/Downloads/xemu/hard-disk-image/XBOX HDD/XBOX_HDD.qcow2/xbox_hdd.qcow2'
+```
+
+The user-supplied EEPROM source is
+`/home/sammy/.local/share/xemu/xemu/eeprom.bin`; current B6 smoke commands use
+the `/tmp/xemu-b6-eeprom.bin` copy to keep unattended runs isolated.
 
 ## Phase 7: Input, Audio, Networking, And Product Hardening
 
