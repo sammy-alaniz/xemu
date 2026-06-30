@@ -197,6 +197,132 @@ async function prepareMemoryBlock(asset) {
   };
 }
 
+const traceOptionSpecs = [
+  {
+    key: "xbeExecProbeLimit",
+    name: "xbe_exec_probe_limit",
+    fileName: "xbe_exec_probe_limit.txt",
+  },
+  {
+    key: "xbeExecProbeStride",
+    name: "xbe_exec_probe_stride",
+    fileName: "xbe_exec_probe_stride.txt",
+  },
+  {
+    key: "xbePhysCompareLimit",
+    name: "xbe_phys_compare_limit",
+    fileName: "xbe_phys_compare_limit.txt",
+  },
+  {
+    key: "xbeKernelLoopLimit",
+    name: "xbe_kernel_loop_limit",
+    fileName: "xbe_kernel_loop_limit.txt",
+  },
+  {
+    key: "xbeKernelLoopAfterIdleLimit",
+    name: "xbe_kernel_loop_after_idle_limit",
+    fileName: "xbe_kernel_loop_after_idle_limit.txt",
+  },
+  {
+    key: "xbeKernelLoopMinHits",
+    name: "xbe_kernel_loop_min_hits",
+    fileName: "xbe_kernel_loop_min_hits.txt",
+  },
+  {
+    key: "xbeMemoryWatchPhys",
+    name: "xbe_memory_watch_phys",
+    fileName: "xbe_memory_watch_phys.txt",
+  },
+  {
+    key: "xbeMemoryWatchLimit",
+    name: "xbe_memory_watch_limit",
+    fileName: "xbe_memory_watch_limit.txt",
+  },
+  {
+    key: "xbeMemoryWatchAccess",
+    name: "xbe_memory_watch_access",
+    fileName: "xbe_memory_watch_access.txt",
+  },
+  {
+    key: "xbePicIrqLimit",
+    name: "xbe_pic_irq_limit",
+    fileName: "xbe_pic_irq_limit.txt",
+  },
+  {
+    key: "xbeCpuHardIrqLimit",
+    name: "xbe_cpu_hard_irq_limit",
+    fileName: "xbe_cpu_hard_irq_limit.txt",
+  },
+  {
+    key: "xbeIretLimit",
+    name: "xbe_iret_limit",
+    fileName: "xbe_iret_limit.txt",
+  },
+  {
+    key: "xbePitIrqLimit",
+    name: "xbe_pit_irq_limit",
+    fileName: "xbe_pit_irq_limit.txt",
+  },
+  {
+    key: "xbeMainLoopTimerLimit",
+    name: "xbe_main_loop_timer_limit",
+    fileName: "xbe_main_loop_timer_limit.txt",
+  },
+  {
+    key: "browserHeadlessTimerPumpProgressLimit",
+    name: "browser_headless_timer_pump_progress_limit",
+    fileName: "browser_headless_timer_pump_progress_limit.txt",
+  },
+  {
+    key: "browserHeadlessTimerPumpMode",
+    name: "browser_headless_timer_pump_mode",
+    fileName: "browser_headless_timer_pump_mode.txt",
+  },
+  {
+    key: "xbeTcgTimerPumpInterval",
+    name: "xbe_tcg_timer_pump_interval",
+    fileName: "xbe_tcg_timer_pump_interval.txt",
+  },
+  {
+    key: "xbeTcgTimerPumpAfterIdleLimit",
+    name: "xbe_tcg_timer_pump_after_idle_limit",
+    fileName: "xbe_tcg_timer_pump_after_idle_limit.txt",
+  },
+  {
+    key: "xbeTcgTimerPumpMode",
+    name: "xbe_tcg_timer_pump_mode",
+    fileName: "xbe_tcg_timer_pump_mode.txt",
+  },
+  {
+    key: "xbeIdleBeforePfifoTransitionLimit",
+    name: "xbe_idle_before_pfifo_transition_limit",
+    fileName: "xbe_idle_before_pfifo_transition_limit.txt",
+  },
+  {
+    key: "xbeIrqAfterPfifoEmptyOnly",
+    name: "xbe_irq_after_pfifo_empty_only",
+    fileName: "xbe_irq_after_pfifo_empty_only.txt",
+  },
+  {
+    key: "xbeIrqWatch",
+    name: "xbe_irq_watch",
+    fileName: "xbe_irq_watch.txt",
+  },
+];
+
+function writeTraceOptions(fs, traceOptions = {}) {
+  for (const spec of traceOptionSpecs) {
+    const value = String(traceOptions[spec.key] || "").trim();
+    if (!value) {
+      continue;
+    }
+
+    const path = `/xemu-fixtures/${spec.fileName}`;
+    fs.writeFile(path, `${value}\n`);
+    postLog(`BROWSER_DIAGNOSTIC_APPLY name=${spec.name} value=${value} target=${path}`);
+  }
+}
+
 async function persistBlockSnapshot(block, snapshot, serializedBytes) {
   try {
     const db = await openBlockSnapshotDb();
@@ -459,8 +585,69 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
   globalThis.xemuBrowserBlockClose = moduleArg.xemuBrowserBlockClose;
 }
 
-async function runBoot({ buildDir, timeoutMs, assets }) {
+function installBrowserDisplayCallbacks(moduleArg) {
+  const heap = () => globalThis.xemuBrowserDisplayHeap || moduleArg.HEAPU8;
+
+  moduleArg.xemuBrowserDisplayFrame = (frameId, width, height, stride, bpp, format, ptr, bytes) => {
+    frameId = Number(frameId);
+    width = Number(width);
+    height = Number(height);
+    stride = Number(stride);
+    bpp = Number(bpp);
+    format = Number(format);
+    ptr = Number(ptr);
+    bytes = Number(bytes);
+
+    if (width <= 0 || height <= 0 || stride <= 0 || bpp <= 0 || ptr <= 0 || bytes <= 0) {
+      postLog([
+        "BROWSER_DISPLAY_FRAME",
+        "result=fail",
+        "reason=bad-geometry",
+        `frame=${frameId}`,
+        `width=${width}`,
+        `height=${height}`,
+        `stride=${stride}`,
+        `bpp=${bpp}`,
+        `bytes=${bytes}`,
+      ].join(" "));
+      return 0;
+    }
+
+    const source = heap().subarray(ptr, ptr + bytes);
+    const copy = source.slice();
+    self.postMessage({
+      type: "displayFrame",
+      frame: {
+        frameId,
+        width,
+        height,
+        stride,
+        bpp,
+        format,
+        buffer: copy.buffer,
+      },
+    }, [copy.buffer]);
+    postLog([
+      "BROWSER_DISPLAY_FRAME",
+      "result=pass",
+      "source=browser-framebuffer",
+      `frame=${frameId}`,
+      `width=${width}`,
+      `height=${height}`,
+      `stride=${stride}`,
+      `bpp=${bpp}`,
+      `format=${format}`,
+      `bytes=${bytes}`,
+    ].join(" "));
+    return 1;
+  };
+
+  globalThis.xemuBrowserDisplayFrame = moduleArg.xemuBrowserDisplayFrame;
+}
+
+async function runBoot({ buildDir, timeoutMs, assets, pcrtcVblankMode = "", browserIcount = "", traceOptions = {} }) {
   const validationError = validateAssets(assets);
+  const hasRealHdd = assets.some((asset) => asset.key === "hdd");
   if (validationError) {
     postLog(`BROWSER_ASSET_VALIDATE result=fail reason=${validationError}`);
     self.postMessage({ type: "done", result: "invalid-assets" });
@@ -486,6 +673,16 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
     self.postMessage({ type: "done", result: "timeout" });
   }, timeoutMs);
 
+  const qemuArgs = [
+    "-config_path", "/xemu-fixtures/xemu-smoke.toml",
+    "-headless_boot_ms", String(timeoutMs),
+  ];
+  const browserIcountText = String(browserIcount || "").trim();
+  if (browserIcountText) {
+    qemuArgs.push("-icount", browserIcountText);
+    postLog(`BROWSER_DIAGNOSTIC_APPLY name=browser_icount value=${browserIcountText} target=argv:-icount`);
+  }
+
   const moduleArg = {
     locateFile(path) {
       if (path.endsWith(".wasm")) {
@@ -493,27 +690,35 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
       }
       return new URL(`${buildDir.replace(/\/$/, "")}/${path}`, self.location.href).href;
     },
-    arguments: [
-      "-config_path", "/xemu-fixtures/xemu-smoke.toml",
-      "-headless_boot_ms", String(timeoutMs),
-    ],
+    arguments: qemuArgs,
     print: postLog,
     printErr: postLog,
   };
   installBrowserBlockCallbacks(moduleArg, browserBlocks);
+  installBrowserDisplayCallbacks(moduleArg);
 
   moduleArg.preRun = [() => {
     moduleFS = moduleArg.FS;
     writeFixtureFiles(moduleArg.FS, materializedAssets);
+    moduleArg.FS.writeFile("/xemu-fixtures/boot_trace_context.txt", "browser-runtime\n");
+    if (pcrtcVblankMode) {
+      moduleArg.FS.writeFile("/xemu-fixtures/pcrtc_vblank_mode.txt", `${pcrtcVblankMode}\n`);
+      postLog(`BROWSER_DIAGNOSTIC_APPLY name=pcrtc_vblank_mode value=${pcrtcVblankMode} target=/xemu-fixtures/pcrtc_vblank_mode.txt`);
+    }
+    writeTraceOptions(moduleArg.FS, traceOptions);
     moduleArg.FS.writeFile("/xemu-fixtures/xemu-smoke.toml", makeConfig(materializedAssets));
   }];
 
   try {
     await Factory(moduleArg);
-    clearTimeout(timeout);
     if (moduleFS) {
       emitEeprom(moduleFS, eepromPath, "module-return");
     }
+    if (hasRealHdd) {
+      postLog(`BROWSER_MODULE_RETURN result=deferred reason=real-hdd elapsed_ms=${Date.now() - startedAt}`);
+      return;
+    }
+    clearTimeout(timeout);
     postLog(`BOOT_SMOKE_RESULT reason=browser-module-return elapsed_ms=${Date.now() - startedAt} exit=0`);
     self.postMessage({ type: "done", result: "pass" });
   } catch (error) {

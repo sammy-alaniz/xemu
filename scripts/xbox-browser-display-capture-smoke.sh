@@ -142,11 +142,16 @@ try {
 }
 EOF
 
+capture_driver_script="${capture_script}"
+if ! "${node_bin}" -e 'require.resolve("playwright")' >/dev/null 2>&1; then
+    capture_driver_script="${repo_root}/scripts/xbox-browser-display-capture-firefox-bidi.mjs"
+fi
+
 XEMU_BROWSER_DISPLAY_CAPTURE_PAGE_URL="${page_url}" \
 XEMU_BROWSER_DISPLAY_CAPTURE_TIMEOUT="${timeout_ms}" \
 XEMU_BROWSER_RUNTIME_CHANNEL="${browser_channel}" \
 XEMU_BROWSER_DISPLAY_CAPTURE_LOG="${capture_log}" \
-    "${node_bin}" "${capture_script}"
+    "${node_bin}" "${capture_driver_script}"
 
 XEMU_DISPLAY_EVIDENCE_ALLOW_SYNTHETIC=1 \
     "${repo_root}/scripts/xbox-display-capture-evidence-check.sh" "${capture_log}"

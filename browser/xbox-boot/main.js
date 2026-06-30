@@ -28,6 +28,9 @@ let worker = null;
 let transcript = [];
 let lastObjectUrl = null;
 let runTimer = null;
+let displaySource = "synthetic-framebuffer";
+let displayFrame = null;
+let autoLoadingAssets = false;
 
 function loadConfig() {
   try {
@@ -157,6 +160,8 @@ function drawSyntheticFramebuffer() {
   }
 
   context.putImageData(image, 0, 0);
+  displaySource = "synthetic-framebuffer";
+  displayFrame = null;
 }
 
 async function sha256Hex(bytes) {
@@ -164,7 +169,78 @@ async function sha256Hex(bytes) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function captureSyntheticDisplayEvidence({ log = true } = {}) {
+function frameToImageData(context, frame) {
+  const { width, height, stride, bpp } = frame;
+  const raw = new Uint8Array(frame.buffer);
+  const rgba = new Uint8ClampedArray(width * height * 4);
+
+  if (bpp === 32) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const source = y * stride + x * 4;
+        const target = (y * width + x) * 4;
+        rgba[target] = raw[source + 2] || 0;
+        rgba[target + 1] = raw[source + 1] || 0;
+        rgba[target + 2] = raw[source] || 0;
+        rgba[target + 3] = 0xff;
+      }
+    }
+  } else if (bpp === 24) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const source = y * stride + x * 3;
+        const target = (y * width + x) * 4;
+        rgba[target] = raw[source + 2] || 0;
+        rgba[target + 1] = raw[source + 1] || 0;
+        rgba[target + 2] = raw[source] || 0;
+        rgba[target + 3] = 0xff;
+      }
+    }
+  } else if (bpp === 16) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const source = y * stride + x * 2;
+        const target = (y * width + x) * 4;
+        const value = (raw[source] || 0) | ((raw[source + 1] || 0) << 8);
+        const x1r5g5b5 = frame.format === 1 || frame.format === 2;
+        rgba[target] = ((value >> (x1r5g5b5 ? 10 : 11)) & 0x1f) * 255 / 31;
+        rgba[target + 1] = ((value >> 5) & (x1r5g5b5 ? 0x1f : 0x3f)) * 255 / (x1r5g5b5 ? 31 : 63);
+        rgba[target + 2] = (value & 0x1f) * 255 / 31;
+        rgba[target + 3] = 0xff;
+      }
+    }
+  } else {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const source = y * stride + x;
+        const target = (y * width + x) * 4;
+        const value = raw[source] || 0;
+        rgba[target] = value;
+        rgba[target + 1] = value;
+        rgba[target + 2] = value;
+        rgba[target + 3] = 0xff;
+      }
+    }
+  }
+
+  return new ImageData(rgba, width, height);
+}
+
+async function drawBrowserDisplayFrame(frame) {
+  const canvas = refs.displayCanvas;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (canvas.width !== frame.width || canvas.height !== frame.height) {
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+    canvas.style.aspectRatio = `${frame.width} / ${frame.height}`;
+  }
+  context.putImageData(frameToImageData(context, frame), 0, 0);
+  displaySource = "browser-framebuffer";
+  displayFrame = frame;
+  await captureDisplayEvidence({ log: true });
+}
+
+async function captureDisplayEvidence({ log = true } = {}) {
   const canvas = refs.displayCanvas;
   const context = canvas.getContext("2d", { alpha: false });
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
@@ -178,23 +254,40 @@ async function captureSyntheticDisplayEvidence({ log = true } = {}) {
   }
 
   const hash = await sha256Hex(image.data);
-  const marker = "BOOT_MARK b4 display=visible source=synthetic-framebuffer";
+  const marker = [
+    "BOOT_MARK b4 display=visible",
+    `source=${displaySource}`,
+    displayFrame ? `frame=${displayFrame.frameId}` : "",
+    `width=${canvas.width}`,
+    `height=${canvas.height}`,
+  ].filter(Boolean).join(" ");
   const capture = [
     "BROWSER_DISPLAY_CAPTURE",
     `result=${nonempty ? "pass" : "fail"}`,
     `nonempty=${nonempty ? "yes" : "no"}`,
     `hash=${hash}`,
-    "source=synthetic-framebuffer",
+    `source=${displaySource}`,
     `width=${canvas.width}`,
     `height=${canvas.height}`,
   ].join(" ");
 
-  if (log) {
+  if (log && nonempty) {
     appendLog(marker);
+  }
+  if (log) {
     appendLog(capture);
   }
 
-  return { marker, capture, hash, nonempty, width: canvas.width, height: canvas.height };
+  return {
+    marker,
+    capture,
+    hash,
+    nonempty,
+    source: displaySource,
+    frameId: displayFrame ? displayFrame.frameId : null,
+    width: canvas.width,
+    height: canvas.height,
+  };
 }
 
 function logBrowserMetadata(buildDir, timeoutMs) {
@@ -252,11 +345,13 @@ function validateAssets() {
   const requireHdd = refs.requireHddInput.checked;
 
   for (const asset of assets) {
-    const file = asset.input.files[0] || null;
+    const file = asset.input.files[0] || asset.serverFile || null;
     const required = asset.required || (requireHdd && asset.key === "hdd");
 
     if (!file) {
-      setAssetStatus(asset, required ? "required" : asset.key === "eeprom" ? "generated" : "optional", required ? "bad" : "");
+      const text = autoLoadingAssets ? "loading" :
+        required ? "required" : asset.key === "eeprom" ? "generated" : "optional";
+      setAssetStatus(asset, text, required || autoLoadingAssets ? "bad" : "");
       ok = ok && !required;
       continue;
     }
@@ -276,7 +371,7 @@ function validateAssets() {
 }
 
 async function fileToTransfer(asset) {
-  const file = asset.input.files[0] || null;
+  const file = asset.input.files[0] || asset.serverFile || null;
   if (!file) {
     return null;
   }
@@ -296,8 +391,203 @@ async function fileToTransfer(asset) {
   };
 }
 
+function assignFileInput(asset, file) {
+  asset.serverFile = file;
+
+  try {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    asset.input.files = dataTransfer.files;
+  } catch {
+    /* Some browsers do not allow assigning input.files. serverFile is enough. */
+  }
+}
+
+async function loadServerAsset(asset) {
+  const response = await fetch(`/__xemu_smoke_asset/${asset.key}`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return false;
+  }
+
+  const filename = response.headers.get("X-Xemu-Asset-Filename") ||
+    `${asset.key}.bin`;
+  const blob = await response.blob();
+  const file = new File([blob], filename, {
+    type: response.headers.get("content-type") || "application/octet-stream",
+  });
+
+  assignFileInput(asset, file);
+  setAssetStatus(asset, `server ${formatBytes(file.size)}`, "ok");
+  appendLog(`BROWSER_ASSET_AUTO result=pass name=${asset.key} file=${JSON.stringify(filename)} size=${file.size}`);
+  return true;
+}
+
+async function autoLoadServerAssets() {
+  autoLoadingAssets = true;
+  validateAssets();
+
+  const loaded = new Set();
+  for (const asset of assets) {
+    if (asset.key === "dvd") {
+      continue;
+    }
+    try {
+      if (await loadServerAsset(asset)) {
+        loaded.add(asset.key);
+      }
+    } catch (error) {
+      appendLog(`BROWSER_ASSET_AUTO result=fail name=${asset.key} reason=${JSON.stringify(error.message)}`);
+    }
+  }
+
+  if (loaded.has("flash") && loaded.has("hdd")) {
+    refs.requireHddInput.checked = true;
+    if ((Number(refs.timeoutInput.value) || 0) < 60000) {
+      refs.timeoutInput.value = "60000";
+    }
+    saveConfig();
+  }
+
+  autoLoadingAssets = false;
+  validateAssets();
+}
+
+const traceOptionSpecs = [
+  {
+    key: "xbeExecProbeLimit",
+    globalKey: "xemuBrowserBootXbeExecProbeLimit",
+    name: "xbe_exec_probe_limit",
+  },
+  {
+    key: "xbeExecProbeStride",
+    globalKey: "xemuBrowserBootXbeExecProbeStride",
+    name: "xbe_exec_probe_stride",
+  },
+  {
+    key: "xbePhysCompareLimit",
+    globalKey: "xemuBrowserBootXbePhysCompareLimit",
+    name: "xbe_phys_compare_limit",
+  },
+  {
+    key: "xbeKernelLoopLimit",
+    globalKey: "xemuBrowserBootXbeKernelLoopLimit",
+    name: "xbe_kernel_loop_limit",
+  },
+  {
+    key: "xbeKernelLoopAfterIdleLimit",
+    globalKey: "xemuBrowserBootXbeKernelLoopAfterIdleLimit",
+    name: "xbe_kernel_loop_after_idle_limit",
+  },
+  {
+    key: "xbeKernelLoopMinHits",
+    globalKey: "xemuBrowserBootXbeKernelLoopMinHits",
+    name: "xbe_kernel_loop_min_hits",
+  },
+  {
+    key: "xbeMemoryWatchPhys",
+    globalKey: "xemuBrowserBootXbeMemoryWatchPhys",
+    name: "xbe_memory_watch_phys",
+  },
+  {
+    key: "xbeMemoryWatchLimit",
+    globalKey: "xemuBrowserBootXbeMemoryWatchLimit",
+    name: "xbe_memory_watch_limit",
+  },
+  {
+    key: "xbeMemoryWatchAccess",
+    globalKey: "xemuBrowserBootXbeMemoryWatchAccess",
+    name: "xbe_memory_watch_access",
+  },
+  {
+    key: "xbePicIrqLimit",
+    globalKey: "xemuBrowserBootXbePicIrqLimit",
+    name: "xbe_pic_irq_limit",
+  },
+  {
+    key: "xbeCpuHardIrqLimit",
+    globalKey: "xemuBrowserBootXbeCpuHardIrqLimit",
+    name: "xbe_cpu_hard_irq_limit",
+  },
+  {
+    key: "xbeIretLimit",
+    globalKey: "xemuBrowserBootXbeIretLimit",
+    name: "xbe_iret_limit",
+  },
+  {
+    key: "xbePitIrqLimit",
+    globalKey: "xemuBrowserBootXbePitIrqLimit",
+    name: "xbe_pit_irq_limit",
+  },
+  {
+    key: "xbeMainLoopTimerLimit",
+    globalKey: "xemuBrowserBootXbeMainLoopTimerLimit",
+    name: "xbe_main_loop_timer_limit",
+  },
+  {
+    key: "browserHeadlessTimerPumpProgressLimit",
+    globalKey: "xemuBrowserBootHeadlessTimerPumpProgressLimit",
+    name: "browser_headless_timer_pump_progress_limit",
+  },
+  {
+    key: "browserHeadlessTimerPumpMode",
+    globalKey: "xemuBrowserBootHeadlessTimerPumpMode",
+    name: "browser_headless_timer_pump_mode",
+  },
+  {
+    key: "xbeTcgTimerPumpInterval",
+    globalKey: "xemuBrowserBootXbeTcgTimerPumpInterval",
+    name: "xbe_tcg_timer_pump_interval",
+  },
+  {
+    key: "xbeTcgTimerPumpAfterIdleLimit",
+    globalKey: "xemuBrowserBootXbeTcgTimerPumpAfterIdleLimit",
+    name: "xbe_tcg_timer_pump_after_idle_limit",
+  },
+  {
+    key: "xbeTcgTimerPumpMode",
+    globalKey: "xemuBrowserBootXbeTcgTimerPumpMode",
+    name: "xbe_tcg_timer_pump_mode",
+  },
+  {
+    key: "xbeIdleBeforePfifoTransitionLimit",
+    globalKey: "xemuBrowserBootXbeIdleBeforePfifoTransitionLimit",
+    name: "xbe_idle_before_pfifo_transition_limit",
+  },
+  {
+    key: "xbeIrqAfterPfifoEmptyOnly",
+    globalKey: "xemuBrowserBootXbeIrqAfterPfifoEmptyOnly",
+    name: "xbe_irq_after_pfifo_empty_only",
+  },
+  {
+    key: "xbeIrqWatch",
+    globalKey: "xemuBrowserBootXbeIrqWatch",
+    name: "xbe_irq_watch",
+  },
+];
+
+function browserTraceOptions() {
+  const source = globalThis.xemuBrowserBootTraceOptions || {};
+  const options = {};
+
+  for (const spec of traceOptionSpecs) {
+    const value = source[spec.key] ?? globalThis[spec.globalKey] ?? "";
+    const text = String(value).trim();
+    if (text) {
+      options[spec.key] = text;
+    }
+  }
+
+  return options;
+}
+
 async function runWithAssets(selectedAssets, runMode) {
   const { buildDir, timeoutMs } = currentConfig();
+  const pcrtcVblankMode = String(globalThis.xemuBrowserBootPcrtcVblankMode || "").trim();
+  const browserIcount = String(globalThis.xemuBrowserBootIcount || "").trim();
+  const traceOptions = browserTraceOptions();
   const startedAt = Date.now();
   saveConfig();
   refs.buildLabel.textContent = `${buildDir}/qemu-system-i386.js`;
@@ -305,6 +595,17 @@ async function runWithAssets(selectedAssets, runMode) {
   transcript = [];
   logBrowserMetadata(buildDir, timeoutMs);
   appendLog(`BROWSER_RUN_MODE mode=${runMode}`);
+  if (pcrtcVblankMode) {
+    appendLog(`BROWSER_DIAGNOSTIC name=pcrtc_vblank_mode value=${pcrtcVblankMode}`);
+  }
+  if (browserIcount) {
+    appendLog(`BROWSER_DIAGNOSTIC name=browser_icount value=${browserIcount}`);
+  }
+  for (const spec of traceOptionSpecs) {
+    if (traceOptions[spec.key]) {
+      appendLog(`BROWSER_DIAGNOSTIC name=${spec.name} value=${traceOptions[spec.key]}`);
+    }
+  }
   await logArtifactMetadata(buildDir);
 
   for (const selected of selectedAssets) {
@@ -317,11 +618,15 @@ async function runWithAssets(selectedAssets, runMode) {
   refs.stopBtn.disabled = false;
 
   worker.onmessage = (event) => {
-    const { type, line, result, base64 } = event.data || {};
+    const { type, line, result, base64, frame } = event.data || {};
     if (type === "log") {
       appendLog(line);
     } else if (type === "eeprom") {
       savePersistedEeprom(base64);
+    } else if (type === "displayFrame") {
+      drawBrowserDisplayFrame(frame).catch((error) => {
+        appendLog(`BROWSER_DISPLAY_CAPTURE result=fail reason=${JSON.stringify(error.message)}`);
+      });
     } else if (type === "done") {
       appendLog(`BROWSER_BOOT_RESULT result=${result || "done"}`);
       stopWorker(false);
@@ -347,6 +652,9 @@ async function runWithAssets(selectedAssets, runMode) {
     type: "start",
     buildDir,
     timeoutMs,
+    pcrtcVblankMode,
+    browserIcount,
+    traceOptions,
     assets: selectedAssets,
   }, selectedAssets.filter((asset) => asset.buffer).map((asset) => asset.buffer));
 }
@@ -419,7 +727,10 @@ function downloadTranscript() {
 }
 
 for (const asset of assets) {
-  asset.input.addEventListener("change", validateAssets);
+  asset.input.addEventListener("change", () => {
+    asset.serverFile = null;
+    validateAssets();
+  });
 }
 
 refs.requireHddInput.addEventListener("change", validateAssets);
@@ -431,7 +742,7 @@ refs.syntheticBtn.addEventListener("click", startSyntheticRun);
 refs.stopBtn.addEventListener("click", () => stopWorker(true));
 refs.downloadBtn.addEventListener("click", downloadTranscript);
 refs.captureDisplayBtn.addEventListener("click", () => {
-  captureSyntheticDisplayEvidence().catch((error) => {
+  captureDisplayEvidence().catch((error) => {
     appendLog(`BROWSER_DISPLAY_CAPTURE result=fail reason=${JSON.stringify(error.message)}`);
   });
 });
@@ -439,5 +750,10 @@ refs.captureDisplayBtn.addEventListener("click", () => {
 loadConfig();
 renderCapabilities();
 drawSyntheticFramebuffer();
-globalThis.xemuBrowserDisplayCapture = captureSyntheticDisplayEvidence;
+globalThis.xemuBrowserDisplayCapture = captureDisplayEvidence;
 validateAssets();
+autoLoadServerAssets().catch((error) => {
+  autoLoadingAssets = false;
+  appendLog(`BROWSER_ASSET_AUTO result=fail reason=${JSON.stringify(error.message)}`);
+  validateAssets();
+});

@@ -9,7 +9,7 @@ Usage: scripts/xbox-boot-completion-audit.sh [synthetic-out-dir] [real-b3-out-di
 Audits the Xbox browser boot evidence against the end-to-end completion
 contract. This is stricter and more diagnostic than the summary command: it
 prints one BOOT_COMPLETION item for every required gate and exits nonzero until
-the real B3, B4, and B5 evidence is complete.
+the real B3, B4, B5, and B6 evidence is complete.
 
 Defaults:
   synthetic-out-dir: build-browser-boot-verify-synthetic
@@ -98,6 +98,7 @@ synthetic_wasm="$(value_for "${summary_line}" synthetic_wasm)"
 real_b3="$(value_for "${summary_line}" real_b3)"
 real_b4="$(value_for "${summary_line}" real_b4)"
 real_b5="$(value_for "${summary_line}" real_b5)"
+real_b6="$(value_for "${summary_line}" real_b6)"
 
 failed=0
 
@@ -115,6 +116,7 @@ emit_gate real_fixture_preflight "$(status_for real_fixture_preflight)" pass rea
 emit_gate real_b3 "${real_b3}" pass real-storage-boot-evidence
 emit_gate real_b4 "${real_b4}" pass visible-display-capture
 emit_gate real_b5 "${real_b5}" pass real-browser-usability
+emit_gate real_b6 "${real_b6}" pass dashboard-xbe-executed-and-native-frame-match
 emit_gate summary "${summary_result}" complete all-required-real-milestones
 
 if [ "${failed}" -eq 0 ]; then
@@ -123,9 +125,9 @@ else
     result="fail"
 fi
 
-printf 'BOOT_COMPLETION_AUDIT_RESULT result=%s failed=%s next=%s synthetic_native=%s synthetic_wasm=%s real_b3=%s real_b4=%s real_b5=%s synthetic_dir=%s real_dir=%s\n' \
+printf 'BOOT_COMPLETION_AUDIT_RESULT result=%s failed=%s next=%s synthetic_native=%s synthetic_wasm=%s real_b3=%s real_b4=%s real_b5=%s real_b6=%s synthetic_dir=%s real_dir=%s\n' \
     "${result}" "${failed}" "${next_step:-unknown}" "${synthetic_native}" "${synthetic_wasm}" \
-    "${real_b3}" "${real_b4}" "${real_b5}" "${synthetic_dir}" "${real_dir}"
+    "${real_b3}" "${real_b4}" "${real_b5}" "${real_b6}" "${synthetic_dir}" "${real_dir}"
 
 if [ "${result}" != "pass" ] && [ "${allow_incomplete}" != "1" ]; then
     exit 1

@@ -37,6 +37,8 @@
 #include "qom/object.h"
 
 #ifdef XBOX
+#include "xemu-xbe.h"
+
 /* FIXME: This is a slightly incomplete implementation of moving
  * QEMU to a dedicated glib context.
  *
@@ -618,9 +620,9 @@ static int os_host_main_loop_wait(int64_t timeout)
     for (pe = first_polling_entry; pe != NULL; pe = pe->next) {
         ret |= pe->func(pe->opaque);
     }
-    
+
     g_main_context_release(context);
-    
+
     if (ret != 0) {
         return ret;
     }
@@ -651,6 +653,17 @@ void main_loop_wait(int nonblocking)
     };
     int ret;
     int64_t timeout_ns;
+#ifdef XBOX
+    int64_t virtual_now_before;
+    int64_t virtual_deadline_before;
+    int64_t virtual_now_after;
+    int64_t virtual_deadline_after;
+    bool virtual_has_timers_before;
+    bool virtual_expired_before;
+    bool virtual_has_timers_after;
+    bool virtual_expired_after;
+    bool timers_progress;
+#endif
 
     if (nonblocking) {
         mlpoll.timeout = 0;
@@ -671,6 +684,14 @@ void main_loop_wait(int nonblocking)
                                       timerlistgroup_deadline_ns(
                                           &main_loop_tlg));
 
+#ifdef XBOX
+    virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline_before =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    virtual_has_timers_before = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+#endif
+
     ret = os_host_main_loop_wait(timeout_ns);
     mlpoll.state = ret < 0 ? MAIN_LOOP_POLL_ERR : MAIN_LOOP_POLL_OK;
     notifier_list_notify(&main_loop_poll_notifiers, &mlpoll);
@@ -682,7 +703,22 @@ void main_loop_wait(int nonblocking)
          */
         icount_start_warp_timer();
     }
+#ifdef XBOX
+    timers_progress = qemu_clock_run_all_timers();
+    virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline_after =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    virtual_has_timers_after = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired_after = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+    xemu_xbe_boot_trace_observe_main_loop_timers(
+        "main-loop-wait",
+        timeout_ns, ret, virtual_now_before, virtual_deadline_before,
+        virtual_has_timers_before, virtual_expired_before, timers_progress,
+        virtual_now_after, virtual_deadline_after, virtual_has_timers_after,
+        virtual_expired_after);
+#else
     qemu_clock_run_all_timers();
+#endif
 }
 
 /* Functions to operate on the main QEMU AioContext.  */

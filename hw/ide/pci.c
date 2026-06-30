@@ -40,6 +40,63 @@
         (IDE_RETRY_DMA | IDE_RETRY_PIO | \
         IDE_RETRY_READ | IDE_RETRY_FLUSH)
 
+static bool bmdma_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static int64_t bmdma_boot_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = 256;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BOOT_TRACE_BMDMA_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_BOOT_TRACE_BMDMA_LIMIT='%s'; using 256\n",
+                value);
+        limit = 256;
+    }
+
+    return limit;
+}
+
+static bool bmdma_boot_mark_allowed(void)
+{
+    static uint64_t mark_count;
+    int64_t limit;
+
+    if (!bmdma_boot_trace_enabled()) {
+        return false;
+    }
+
+    limit = bmdma_boot_trace_limit();
+    if (limit == 0 || mark_count >= limit) {
+        return false;
+    }
+
+    mark_count++;
+    return true;
+}
+
 static uint64_t pci_ide_status_read(void *opaque, hwaddr addr, unsigned size)
 {
     IDEBus *bus = opaque;
@@ -205,6 +262,14 @@ static void bmdma_start_dma(const IDEDMA *dma, IDEState *s,
     bm->cur_prd_addr = 0;
     bm->cur_prd_len = 0;
 
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=start_dma unit=%d status=0x%02x"
+                " cmd=0x%02x addr=0x%08x dmaing=%s\n",
+                s->unit, bm->status, bm->cmd, bm->addr,
+                (bm->status & BM_STATUS_DMAING) ? "yes" : "no");
+    }
+
     if (bm->status & BM_STATUS_DMAING) {
         bm->dma_cb(bmdma_active_if(bm), 0);
     }
@@ -266,6 +331,15 @@ static int32_t bmdma_prepare_buf(const IDEDMA *dma, int32_t limit)
             s->io_buffer_size += l;
         }
     }
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=prepare unit=%d limit=%d sg_size=%" PRIu64
+                " io_buffer_size=%d cur_addr=0x%08x prd_last=%u"
+                " prd_addr=0x%08x prd_len=%u\n",
+                s->unit, limit, (uint64_t)s->sg.size, s->io_buffer_size,
+                bm->cur_addr, bm->cur_prd_last, bm->cur_prd_addr,
+                bm->cur_prd_len);
+    }
     return s->sg.size;
 }
 
@@ -322,12 +396,20 @@ static int bmdma_rw_buf(const IDEDMA *dma, bool is_write)
 static void bmdma_set_inactive(const IDEDMA *dma, bool more)
 {
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
+    uint8_t old_status = bm->status;
 
     bm->dma_cb = NULL;
     if (more) {
         bm->status |= BM_STATUS_DMAING;
     } else {
         bm->status &= ~BM_STATUS_DMAING;
+    }
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=set_inactive more=%s old_status=0x%02x"
+                " new_status=0x%02x cmd=0x%02x addr=0x%08x\n",
+                more ? "yes" : "no", old_status, bm->status, bm->cmd,
+                bm->addr);
     }
 }
 
@@ -365,6 +447,13 @@ static void bmdma_irq(void *opaque, int n, int level)
 {
     BMDMAState *bm = opaque;
 
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=irq level=%d old_status=0x%02x"
+                " cmd=0x%02x addr=0x%08x\n",
+                level, bm->status, bm->cmd, bm->addr);
+    }
+
     if (!level) {
         /* pass through lower */
         qemu_set_irq(bm->irq, level);
@@ -379,7 +468,17 @@ static void bmdma_irq(void *opaque, int n, int level)
 
 void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
 {
+    uint8_t old_cmd = bm->cmd;
+    uint8_t old_status = bm->status;
+
     trace_bmdma_cmd_writeb(val);
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=cmd_write val=0x%02x old_cmd=0x%02x"
+                " old_status=0x%02x addr=0x%08x dma_cb=%s\n",
+                val, old_cmd, old_status, bm->addr,
+                bm->dma_cb ? "yes" : "no");
+    }
 
     /* Ignore writes to SSBM if it keeps the old value */
     if ((val & BM_CMD_START) != (bm->cmd & BM_CMD_START)) {
@@ -402,8 +501,17 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
 
 void bmdma_status_writeb(BMDMAState *bm, uint32_t val)
 {
+    uint8_t old_status = bm->status;
+
     bm->status = (val & 0x60) | (bm->status & BM_STATUS_DMAING)
                  | (bm->status & ~val & (BM_STATUS_ERROR | BM_STATUS_INT));
+    if (bmdma_boot_mark_allowed()) {
+        fprintf(stderr,
+                "BOOT_MARK b3 bmdma=status_write val=0x%02x"
+                " old_status=0x%02x new_status=0x%02x cmd=0x%02x"
+                " addr=0x%08x\n",
+                val, old_status, bm->status, bm->cmd, bm->addr);
+    }
 }
 
 static uint64_t bmdma_addr_read(void *opaque, hwaddr addr,

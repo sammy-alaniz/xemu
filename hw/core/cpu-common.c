@@ -28,11 +28,13 @@
 #include "qemu/error-report.h"
 #include "qemu/qemu-print.h"
 #include "qemu/target-info.h"
+#include "exec/cpu-interrupt.h"
 #include "exec/log.h"
 #include "exec/gdbstub.h"
 #include "system/tcg.h"
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
+#include "xemu-xbe.h"
 #include "trace.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin.h"
@@ -69,7 +71,17 @@ CPUState *cpu_create(const char *typename)
 
 void cpu_reset_interrupt(CPUState *cpu, int mask)
 {
+    uint32_t request_before = qatomic_read(&cpu->interrupt_request);
+
     qatomic_and(&cpu->interrupt_request, ~mask);
+
+    if (mask & CPU_INTERRUPT_HARD) {
+        uint32_t request_after = qatomic_read(&cpu->interrupt_request);
+
+        xemu_xbe_boot_trace_observe_cpu_hard_irq("reset", mask,
+                                                 request_before,
+                                                 request_after);
+    }
 }
 
 void cpu_exit(CPUState *cpu)

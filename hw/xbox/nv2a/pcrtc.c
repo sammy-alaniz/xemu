@@ -50,17 +50,24 @@ uint64_t pcrtc_read(void *opaque, hwaddr addr, unsigned int size)
 void pcrtc_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
+    NV2AIrqTraceState irq_before;
 
     nv2a_reg_log_write(NV_PCRTC, addr, size, val);
 
     switch (addr) {
     case NV_PCRTC_INTR_0:
+        nv2a_irq_trace_capture(d, &irq_before);
         d->pcrtc.pending_interrupts &= ~val;
         nv2a_update_irq(d);
+        nv2a_boot_trace_irq_source(d, "pcrtc", "intr-clear", val,
+                                   &irq_before);
         break;
     case NV_PCRTC_INTR_EN_0:
+        nv2a_irq_trace_capture(d, &irq_before);
         d->pcrtc.enabled_interrupts = val;
         nv2a_update_irq(d);
+        nv2a_boot_trace_irq_source(d, "pcrtc", "intr-enable", val,
+                                   &irq_before);
         break;
     case NV_PCRTC_START:
         val &= 0x07FFFFFF;

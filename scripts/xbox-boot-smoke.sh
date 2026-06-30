@@ -28,6 +28,10 @@ Optional controls:
   XEMU_SMOKE_OUT_DIR        Output dir. Default: build-docker/boot-smoke.
   XEMU_SMOKE_MS             Timeout ms. Default: 3000.
   XEMU_SMOKE_EXPECT_LEVEL   Expected minimum B-level. Default: B0.
+  XEMU_SMOKE_SKIP_BOOT_ANIM Set to 1 to request the Xbox short boot animation.
+  XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE
+                            Set to 1 to pump native headless graphic updates.
+  XEMU_BOOT_TRACE_XBE_*     Optional B6 XBE diagnostic limits/controls.
 EOF
 }
 
@@ -40,6 +44,7 @@ case "${out_dir}" in
 esac
 timeout_ms="${XEMU_SMOKE_MS:-3000}"
 expect_level="${XEMU_SMOKE_EXPECT_LEVEL:-B0}"
+skip_boot_anim="${XEMU_SMOKE_SKIP_BOOT_ANIM:-0}"
 expected_value=""
 docker_image="${XEMU_SMOKE_DOCKER_IMAGE:-xemu-native-build:latest}"
 docker_build_dir="${XEMU_SMOKE_BUILD_DIR:-build-docker}"
@@ -71,6 +76,7 @@ level_value() {
         B3|b3) echo 3 ;;
         B4|b4) echo 4 ;;
         B5|b5) echo 5 ;;
+        B6|b6) echo 6 ;;
         *)
             echo "Unknown boot level '$1'" >&2
             exit 2
@@ -114,6 +120,14 @@ has_structured_b3_hdd_marker() {
     grep -Eq '^BOOT_MARK b3 ide=hdd first_read_lba=[0-9]+ nsectors=[0-9]+ method=(pio|dma) unit=[0-9]+ total_sectors=[0-9]+' "$1"
 }
 
+has_browser_block_b3_hdd_marker() {
+    grep -Eq '^BOOT_MARK b3 browser_block=read ' "$1"
+}
+
+has_b3_hdd_marker() {
+    has_structured_b3_hdd_marker "$1" || has_browser_block_b3_hdd_marker "$1"
+}
+
 marker_count_for_level() {
     local log="$1"
     local level="$2"
@@ -144,6 +158,18 @@ toml_escape() {
 }
 
 expected_value="$(level_value "${expect_level}")"
+case "${skip_boot_anim}" in
+    0|false|False|FALSE|no|No|NO)
+        skip_boot_anim_config="false"
+        ;;
+    1|true|True|TRUE|yes|Yes|YES)
+        skip_boot_anim_config="true"
+        ;;
+    *)
+        echo "XEMU_SMOKE_SKIP_BOOT_ANIM must be 0 or 1, got: ${skip_boot_anim}" >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "${out_dir}"
 rm -f "${log_path}"
@@ -203,7 +229,7 @@ fi
 cat > "${config_path}" <<EOF
 [general]
 show_welcome = false
-skip_boot_anim = false
+skip_boot_anim = ${skip_boot_anim_config}
 
 [general.updates]
 check = false
@@ -236,7 +262,9 @@ run_native() {
     XEMU_HEADLESS_BOOT=1 \
     XEMU_BOOT_TRACE=1 \
     XEMU_HEADLESS_BOOT_MS="${timeout_ms}" \
-        "${native_binary}" -config_path "${config_path}"
+    XEMU_BOOT_TRACE_CONTEXT=native-headless \
+        "${native_binary}" \
+            -config_path "${config_path}"
 }
 
 run_docker() {
@@ -248,12 +276,72 @@ run_docker() {
         -e HOME=/tmp/xemu-home
         -e XEMU_HEADLESS_BOOT=1
         -e XEMU_BOOT_TRACE=1
+        -e XEMU_BOOT_TRACE_CONTEXT=native-headless
         -e XEMU_HEADLESS_BOOT_MS="${timeout_ms}"
         -v "${repo_root}:/workspace"
         -v "${out_dir}:/xemu-smoke-out"
         -v "${XEMU_FLASH}:/xemu-fixtures/flash.bin:ro"
         -v "${eeprom_path}:/xemu-fixtures/eeprom.bin"
     )
+    local trace_env
+
+    for trace_env in \
+        XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE \
+        XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE_INTERVAL_US; do
+        if [ -n "${!trace_env:-}" ]; then
+            docker_args+=(-e "${trace_env}=${!trace_env}")
+        fi
+    done
+
+    for trace_env in \
+        XEMU_BOOT_TRACE_DMA_LIMIT \
+        XEMU_BOOT_TRACE_IDE_READ_LIMIT \
+        XEMU_BOOT_TRACE_BMDMA_LIMIT \
+        XEMU_BOOT_TRACE_XBE_DMA_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PHYS_SCAN \
+        XEMU_BOOT_TRACE_XBE_PHYS_SCAN_BYTES \
+        XEMU_BOOT_TRACE_XBE_VIRTUAL_PROBE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_READ_PROGRESS_LIMIT \
+        XEMU_BOOT_TRACE_XBE_EXEC_PROBE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PHYS_COMPARE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_EXEC_EDGE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_LIMIT \
+        XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_WINDOW \
+        XEMU_BOOT_TRACE_XBE_DISPATCH_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_PHYS \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_LIMIT \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_ACCESS \
+        XEMU_BOOT_TRACE_XBE_EXEC_PROBE_STRIDE \
+        XEMU_BOOT_TRACE_XBE_PIC_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_CPU_HARD_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_IRET_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PIT_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT \
+        XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_INTERVAL \
+        XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE \
+        XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT \
+        XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY \
+        XEMU_BOOT_TRACE_XBE_IRQ_WATCH \
+        XEMU_BOOT_TRACE_NV2A_PMC_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LOW_PRIORITY_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_PCRTC_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_START \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_START \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_CLEAR_LIMIT; do
+        if [ -n "${!trace_env:-}" ]; then
+            docker_args+=(-e "${trace_env}=${!trace_env}")
+        fi
+    done
 
     if [ ! -x "${repo_root}/${docker_build_dir}/qemu-system-i386" ]; then
         echo "Docker-built binary is missing: ${repo_root}/${docker_build_dir}/qemu-system-i386" >&2
@@ -281,6 +369,30 @@ run_docker() {
 }
 
 run_wasm_node() {
+    if [ "${expected_value}" -ge 3 ] && [ -n "${XEMU_HDD:-}" ]; then
+        local delegate_out="${out_dir}/browser-block"
+        local delegate_summary="${out_dir}/browser-block-summary.log"
+        local delegate_status
+
+        set +e
+        XEMU_BROWSER_BLOCK_OUT_DIR="${delegate_out}" \
+        XEMU_BROWSER_BLOCK_MS="${timeout_ms}" \
+        XEMU_SMOKE_WASM_IMAGE="${wasm_image}" \
+        XEMU_SMOKE_WASM_BUILD_DIR="${wasm_build_dir}" \
+            "${repo_root}/scripts/xbox-browser-block-callback-smoke.sh" \
+                >"${delegate_summary}" 2>&1
+        delegate_status="$?"
+        set -e
+
+        if [ -f "${delegate_out}/browser-block-callback-smoke.log" ]; then
+            cat "${delegate_out}/browser-block-callback-smoke.log"
+        fi
+        if [ "${delegate_status}" -ne 0 ]; then
+            cat "${delegate_summary}"
+        fi
+        return "${delegate_status}"
+    fi
+
     local container_config="/xemu-smoke-out/$(basename "${config_path}")"
     local container_workdir="/workspace/${wasm_build_dir}"
     local timeout_s="$(( (timeout_ms + 999) / 1000 + 1 ))"
@@ -290,6 +402,7 @@ run_wasm_node() {
         -e HOME=/tmp/xemu-home
         -e XEMU_HEADLESS_BOOT=1
         -e XEMU_BOOT_TRACE=1
+        -e XEMU_BOOT_TRACE_CONTEXT=wasm-node-headless
         -e XEMU_HEADLESS_BOOT_MS="${timeout_ms}"
         -e XEMU_NODE_CONFIG="${container_config}"
         -e XEMU_NODE_TIMEOUT_MS="${timeout_ms}"
@@ -298,6 +411,57 @@ run_wasm_node() {
         -v "${XEMU_FLASH}:/xemu-fixtures/flash.bin:ro"
         -v "${eeprom_path}:/xemu-fixtures/eeprom.bin"
     )
+    local trace_env
+
+    for trace_env in \
+        XEMU_BOOT_TRACE_DMA_LIMIT \
+        XEMU_BOOT_TRACE_IDE_READ_LIMIT \
+        XEMU_BOOT_TRACE_BMDMA_LIMIT \
+        XEMU_BOOT_TRACE_XBE_DMA_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PHYS_SCAN \
+        XEMU_BOOT_TRACE_XBE_PHYS_SCAN_BYTES \
+        XEMU_BOOT_TRACE_XBE_VIRTUAL_PROBE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_READ_PROGRESS_LIMIT \
+        XEMU_BOOT_TRACE_XBE_EXEC_PROBE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PHYS_COMPARE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_EXEC_EDGE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_LIMIT \
+        XEMU_BOOT_TRACE_XBE_ENTRY_TARGET_WINDOW \
+        XEMU_BOOT_TRACE_XBE_DISPATCH_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT \
+        XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_PHYS \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_LIMIT \
+        XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_ACCESS \
+        XEMU_BOOT_TRACE_XBE_EXEC_PROBE_STRIDE \
+        XEMU_BOOT_TRACE_XBE_PIC_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_CPU_HARD_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_IRET_LIMIT \
+        XEMU_BOOT_TRACE_XBE_PIT_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT \
+        XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_INTERVAL \
+        XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE \
+        XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT \
+        XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY \
+        XEMU_BOOT_TRACE_XBE_IRQ_WATCH \
+        XEMU_BOOT_TRACE_NV2A_PMC_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_LOW_PRIORITY_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_IRQ_LINE_PCRTC_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_START \
+        XEMU_BOOT_TRACE_NV2A_PFIFO_WINDOW_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_START \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT \
+        XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_CLEAR_LIMIT; do
+        if [ -n "${!trace_env:-}" ]; then
+            docker_args+=(-e "${trace_env}=${!trace_env}")
+        fi
+    done
 
     if [ ! -f "${repo_root}/${wasm_build_dir}/qemu-system-i386.js" ] || [ ! -f "${repo_root}/${wasm_build_dir}/qemu-system-i386.wasm" ]; then
         echo "Wasm build artifacts are missing in ${repo_root}/${wasm_build_dir}" >&2
@@ -338,6 +502,7 @@ run_wasm_node() {
                     moduleArg.FS.mount(moduleArg.NODEFS, { root: "/workspace" }, "/workspace");
                     moduleArg.FS.mkdir("/xemu-smoke-out");
                     moduleArg.FS.mount(moduleArg.NODEFS, { root: "/xemu-smoke-out" }, "/xemu-smoke-out");
+                    moduleArg.FS.writeFile("/xemu-smoke-out/boot_trace_context.txt", "wasm-node-headless\n");
                     moduleArg.FS.mkdir("/xemu-fixtures");
                     moduleArg.FS.mount(moduleArg.NODEFS, { root: "/xemu-fixtures" }, "/xemu-fixtures");
                     moduleArg.FS.mkdirTree("/home/web_user/.local/share/xemu/xemu");
@@ -379,7 +544,7 @@ fi
 highest_level="NONE"
 highest_value=-1
 failure_reason=""
-for level in b0 b1 b2 b3 b4 b5; do
+for level in b0 b1 b2 b3 b4 b5 b6; do
     if grep -q "BOOT_MARK ${level}" "${log_path}"; then
         value="$(level_value "${level}")"
         highest_level="B${value}"
@@ -394,7 +559,7 @@ else
     result="pass"
 fi
 
-if [ "${expected_value}" -ge 3 ] && ! has_structured_b3_hdd_marker "${log_path}"; then
+if [ "${expected_value}" -ge 3 ] && ! has_b3_hdd_marker "${log_path}"; then
     result="fail"
     failure_reason="missing-b3-hdd-read"
 fi
@@ -417,10 +582,14 @@ if [ -n "${elapsed_ms}" ]; then
     b1_markers="$(marker_count_for_level "${log_path}" b1)"
     b2_markers="$(marker_count_for_level "${log_path}" b2)"
     b3_markers="$(marker_count_for_level "${log_path}" b3)"
+    b4_markers="$(marker_count_for_level "${log_path}" b4)"
+    b5_markers="$(marker_count_for_level "${log_path}" b5)"
+    b6_markers="$(marker_count_for_level "${log_path}" b6)"
     marker_rate="$(marker_rate_per_sec "${total_markers}" "${elapsed_ms}")"
-    printf 'BOOT_SMOKE_METRIC mode=%s elapsed_ms=%s markers=%s markers_per_sec=%s b0=%s b1=%s b2=%s b3=%s\n' \
+    printf 'BOOT_SMOKE_METRIC mode=%s elapsed_ms=%s markers=%s markers_per_sec=%s b0=%s b1=%s b2=%s b3=%s b4=%s b5=%s b6=%s\n' \
         "${mode}" "${elapsed_ms}" "${total_markers}" "${marker_rate}" \
-        "${b0_markers}" "${b1_markers}" "${b2_markers}" "${b3_markers}"
+        "${b0_markers}" "${b1_markers}" "${b2_markers}" "${b3_markers}" \
+        "${b4_markers}" "${b5_markers}" "${b6_markers}"
 fi
 
 grep -E '^(Created QEMU launch parameters:|BOOT_MARK |BOOT_SMOKE_RESULT )' "${log_path}" || true

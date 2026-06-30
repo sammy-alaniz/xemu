@@ -226,7 +226,12 @@ try {
 }
 EOF
 
+smoke_driver_script="${smoke_script}"
+if ! "${node_bin}" -e 'require.resolve("playwright")' >/dev/null 2>&1; then
+    smoke_driver_script="${repo_root}/scripts/xbox-browser-block-persistence-firefox-bidi.mjs"
+fi
+
 XEMU_BROWSER_BLOCK_PERSISTENCE_PAGE_URL="${page_url}" \
 XEMU_BROWSER_BLOCK_PERSISTENCE_TIMEOUT="${timeout_ms}" \
 XEMU_BROWSER_RUNTIME_CHANNEL="${browser_channel}" \
-    "${node_bin}" "${smoke_script}"
+    "${node_bin}" "${smoke_driver_script}"

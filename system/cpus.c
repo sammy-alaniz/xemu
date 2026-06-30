@@ -34,6 +34,7 @@
 #include "accel/accel-cpu-ops.h"
 #include "system/hw_accel.h"
 #include "exec/cpu-common.h"
+#include "exec/cpu-interrupt.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
 #include "qemu/plugin.h"
@@ -47,6 +48,7 @@
 #include "hw/boards.h"
 #include "hw/hw.h"
 #include "trace.h"
+#include "xemu-xbe.h"
 
 #ifdef CONFIG_LINUX
 
@@ -256,8 +258,18 @@ int64_t cpus_get_elapsed_ticks(void)
 
 void cpu_set_interrupt(CPUState *cpu, int mask)
 {
+    uint32_t request_before = qatomic_read(&cpu->interrupt_request);
+
     /* Pairs with cpu_test_interrupt(). */
     qatomic_or(&cpu->interrupt_request, mask);
+
+    if (mask & CPU_INTERRUPT_HARD) {
+        uint32_t request_after = qatomic_read(&cpu->interrupt_request);
+
+        xemu_xbe_boot_trace_observe_cpu_hard_irq("set", mask,
+                                                 request_before,
+                                                 request_after);
+    }
 }
 
 void generic_handle_interrupt(CPUState *cpu, int mask)
@@ -576,6 +588,12 @@ void bql_lock_impl(const char *file, int line)
 
     g_assert(!bql_locked());
     bql_lock_fn(&bql, file, line);
+}
+
+bool bql_try_lock_impl(const char *file, int line)
+{
+    g_assert(!bql_locked());
+    return qemu_mutex_trylock_impl(&bql, file, line) == 0;
 }
 
 void bql_unlock(void)
@@ -916,4 +934,3 @@ void qmp_inject_nmi(Error **errp)
 {
     nmi_monitor_handle(monitor_get_cpu_index(monitor_cur()), errp);
 }
-

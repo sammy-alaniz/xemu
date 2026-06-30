@@ -24,6 +24,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
+#include "xemu-xbe.h"
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
@@ -36,8 +37,20 @@
         pgraph_reg_w(pg, reg, rv);           \
     } while (0)
 
+#define XEMU_NV2A_PGRAPH_METHOD_TRACE_DEFAULT_LIMIT 256
+#define XEMU_NV2A_PGRAPH_NOTIFY_TRACE_DEFAULT_LIMIT 128
+#define XEMU_NV2A_PGRAPH_NOTIFY_CLEAR_TRACE_DEFAULT_LIMIT 128
+#define XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_START 0x03880e00u
+#define XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_LIMIT 256
 
 NV2AState *g_nv2a;
+
+static void pgraph_boot_trace_notify_clear(NV2AState *d, uint32_t value,
+                                           uint32_t pending_before,
+                                           uint32_t enabled_before,
+                                           bool waiting_nop_before,
+                                           bool waiting_context_before,
+                                           const NV2AIrqTraceState *before);
 
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
@@ -84,6 +97,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
     PGRAPHState *pg = &d->pgraph;
+    NV2AIrqTraceState irq_before;
 
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
 
@@ -92,6 +106,11 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     switch (addr) {
     case NV_PGRAPH_INTR:
+        nv2a_irq_trace_capture(d, &irq_before);
+        uint32_t pending_before = pg->pending_interrupts;
+        uint32_t enabled_before = pg->enabled_interrupts;
+        bool waiting_nop_before = pg->waiting_for_nop;
+        bool waiting_context_before = pg->waiting_for_context_switch;
         pg->pending_interrupts &= ~val;
 
         if (!(pg->pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
@@ -101,9 +120,19 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
             pg->waiting_for_context_switch = false;
         }
         pfifo_kick(d);
+        nv2a_update_irq(d);
+        pgraph_boot_trace_notify_clear(d, val, pending_before,
+                                       enabled_before, waiting_nop_before,
+                                       waiting_context_before, &irq_before);
+        nv2a_boot_trace_irq_source(d, "pgraph", "intr-clear", val,
+                                   &irq_before);
         break;
     case NV_PGRAPH_INTR_EN:
+        nv2a_irq_trace_capture(d, &irq_before);
         pg->enabled_interrupts = val;
+        nv2a_update_irq(d);
+        nv2a_boot_trace_irq_source(d, "pgraph", "intr-enable", val,
+                                   &irq_before);
         break;
     case NV_PGRAPH_INCREMENT:
         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
@@ -200,8 +229,13 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
         pg->waiting_for_context_switch = true;
         qemu_mutex_unlock(&pg->lock);
         bql_lock();
+        NV2AIrqTraceState irq_before;
+
+        nv2a_irq_trace_capture(d, &irq_before);
         pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
         nv2a_update_irq(d);
+        nv2a_boot_trace_irq_source(d, "pgraph", "context-switch-raise",
+                                   channel_id, &irq_before);
         bql_unlock();
         qemu_mutex_lock(&pg->lock);
     }
@@ -557,6 +591,705 @@ static void pgraph_method_log(unsigned int subchannel,
     last = method;
 }
 
+static bool pgraph_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static const char *pgraph_boot_trace_context(void)
+{
+    static bool initialized;
+    static char context[64];
+    const char *env_context = getenv("XEMU_BOOT_TRACE_CONTEXT");
+    const char *paths[] = {
+        "/xemu-fixtures/boot_trace_context.txt",
+        "/xemu-smoke/boot_trace_context.txt",
+        "/xemu-smoke-out/boot_trace_context.txt",
+        NULL,
+    };
+
+    if (initialized) {
+        return context;
+    }
+    initialized = true;
+
+    if (env_context && env_context[0]) {
+        g_strlcpy(context, env_context, sizeof(context));
+        return context;
+    }
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(context, sizeof(context), fp)) {
+            context[strcspn(context, "\r\n")] = 0;
+        }
+        fclose(fp);
+
+        if (context[0]) {
+            return context;
+        }
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    g_strlcpy(context, "browser-boot", sizeof(context));
+#else
+    g_strlcpy(context, "native-headless", sizeof(context));
+#endif
+    return context;
+}
+
+static int64_t pgraph_method_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_NV2A_PGRAPH_METHOD_TRACE_DEFAULT_LIMIT;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        limit = XEMU_NV2A_PGRAPH_METHOD_TRACE_DEFAULT_LIMIT;
+    }
+
+    return limit;
+}
+
+static int64_t pgraph_notify_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_NV2A_PGRAPH_NOTIFY_TRACE_DEFAULT_LIMIT;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        limit = XEMU_NV2A_PGRAPH_NOTIFY_TRACE_DEFAULT_LIMIT;
+    }
+
+    return limit;
+}
+
+static int64_t pgraph_notify_clear_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_NV2A_PGRAPH_NOTIFY_CLEAR_TRACE_DEFAULT_LIMIT;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_CLEAR_LIMIT");
+    if (!value || !value[0]) {
+        value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_NOTIFY_LIMIT");
+    }
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        limit = XEMU_NV2A_PGRAPH_NOTIFY_CLEAR_TRACE_DEFAULT_LIMIT;
+    }
+
+    return limit;
+}
+
+static void pgraph_boot_trace_notify_clear(NV2AState *d, uint32_t value,
+                                           uint32_t pending_before,
+                                           uint32_t enabled_before,
+                                           bool waiting_nop_before,
+                                           bool waiting_context_before,
+                                           const NV2AIrqTraceState *before)
+{
+    static uint64_t count;
+    int64_t limit;
+    PGRAPHState *pg = &d->pgraph;
+
+    if (!pgraph_boot_trace_enabled() ||
+        !xemu_xbe_boot_trace_dashboard_observed()) {
+        return;
+    }
+    if (!((pending_before & NV_PGRAPH_INTR_ERROR) ||
+          (value & NV_PGRAPH_INTR_ERROR) ||
+          waiting_nop_before)) {
+        return;
+    }
+
+    limit = pgraph_notify_clear_trace_limit();
+    if (limit == 0 || count >= (uint64_t)limit) {
+        return;
+    }
+    count++;
+
+    uint32_t ctx_user = pgraph_reg_r(pg, NV_PGRAPH_CTX_USER);
+    uint32_t ctx_control = pgraph_reg_r(pg, NV_PGRAPH_CTX_CONTROL);
+    uint32_t fifo = pgraph_reg_r(pg, NV_PGRAPH_FIFO);
+    uint32_t nsource = pgraph_reg_r(pg, NV_PGRAPH_NSOURCE);
+    uint32_t trapped_addr = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_ADDR);
+    uint32_t trapped_data = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_DATA_LOW);
+    uint32_t dma_state = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    XemuXbeBootTraceNv2aWaitState wait_state = {
+        .source = "pgraph-notify-clear",
+        .op = "notify-error-clear",
+        .seq = count,
+        .method = GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+        .parameter = value,
+        .dma_get = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+        .dma_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
+        .dma_state_method =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+        .dma_state_count =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+        .pmc_pending = d->pmc.pending_interrupts,
+        .pmc_enabled = d->pmc.enabled_interrupts,
+        .pfifo_pending = d->pfifo.pending_interrupts,
+        .pfifo_enabled = d->pfifo.enabled_interrupts,
+        .pcrtc_pending = d->pcrtc.pending_interrupts,
+        .pcrtc_enabled = d->pcrtc.enabled_interrupts,
+        .pgraph_pending = pg->pending_interrupts,
+        .pgraph_enabled = pg->enabled_interrupts,
+        .pfifo_known = false,
+        .fifo_access = (fifo & NV_PGRAPH_FIFO_ACCESS) != 0,
+        .pgraph_waiting_flip = pg->waiting_for_flip,
+        .pgraph_waiting_nop = pg->waiting_for_nop,
+        .pgraph_waiting_context = pg->waiting_for_context_switch,
+    };
+    xemu_xbe_boot_trace_observe_nv2a_wait_state(&wait_state);
+
+    fprintf(stderr,
+            "BOOT_MARK b6 pgraph=notify-clear context=%s"
+            " seq=%" PRIu64
+            " op=notify-error-clear"
+            " value=0x%08x"
+            " pending_before=0x%08x"
+            " enabled_before=0x%08x"
+            " pending_after=0x%08x"
+            " enabled_after=0x%08x"
+            " pmc_pending_before=0x%08x"
+            " pmc_enabled_before=0x%08x"
+            " pmc_pending_current=0x%08x"
+            " pmc_enabled_current=0x%08x"
+            " pfifo_pending=0x%08x"
+            " pfifo_enabled=0x%08x"
+            " pcrtc_pending=0x%08x"
+            " pcrtc_enabled=0x%08x"
+            " dma_get=0x%08x"
+            " dma_put=0x%08x"
+            " dma_state=0x%08x"
+            " dma_state_method=0x%04x"
+            " dma_state_count=%u"
+            " dma_state_type=%u"
+            " dma_state_subchannel=%u"
+            " fifo=0x%08x"
+            " fifo_access=%s"
+            " waiting_flip=%s"
+            " waiting_nop_before=%s"
+            " waiting_nop_after=%s"
+            " waiting_context_before=%s"
+            " waiting_context_after=%s"
+            " ctx_control=0x%08x"
+            " ctx_user=0x%08x"
+            " ctx_channel=%u"
+            " trapped_addr=0x%08x"
+            " trapped_data=0x%08x"
+            " nsource=0x%08x\n",
+            pgraph_boot_trace_context(), count, value, pending_before,
+            enabled_before, pg->pending_interrupts, pg->enabled_interrupts,
+            before->pmc_pending, before->pmc_enabled,
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts,
+            d->pfifo.pending_interrupts, d->pfifo.enabled_interrupts,
+            d->pcrtc.pending_interrupts, d->pcrtc.enabled_interrupts,
+            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT], dma_state,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_SUBCHANNEL),
+            fifo, (fifo & NV_PGRAPH_FIFO_ACCESS) ? "yes" : "no",
+            pg->waiting_for_flip ? "yes" : "no",
+            waiting_nop_before ? "yes" : "no",
+            pg->waiting_for_nop ? "yes" : "no",
+            waiting_context_before ? "yes" : "no",
+            pg->waiting_for_context_switch ? "yes" : "no",
+            ctx_control, ctx_user, GET_MASK(ctx_user, NV_PGRAPH_CTX_USER_CHID),
+            trapped_addr, trapped_data, nsource);
+}
+
+static void pgraph_boot_trace_notify_error(NV2AState *d,
+                                           unsigned int channel_id,
+                                           unsigned int subchannel,
+                                           unsigned int method,
+                                           uint32_t parameter,
+                                           const NV2AIrqTraceState *before)
+{
+    static uint64_t count;
+    int64_t limit;
+    PGRAPHState *pg = &d->pgraph;
+
+    if (!pgraph_boot_trace_enabled() ||
+        !xemu_xbe_boot_trace_dashboard_observed()) {
+        return;
+    }
+
+    limit = pgraph_notify_trace_limit();
+    if (limit == 0 || count >= (uint64_t)limit) {
+        return;
+    }
+    count++;
+
+    uint32_t ctx_user = pgraph_reg_r(pg, NV_PGRAPH_CTX_USER);
+    uint32_t ctx_control = pgraph_reg_r(pg, NV_PGRAPH_CTX_CONTROL);
+    uint32_t fifo = pgraph_reg_r(pg, NV_PGRAPH_FIFO);
+    uint32_t nsource = pgraph_reg_r(pg, NV_PGRAPH_NSOURCE);
+    uint32_t trapped_addr = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_ADDR);
+    uint32_t trapped_data = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_DATA_LOW);
+    uint32_t dma_state = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    XemuXbeBootTraceNv2aWaitState wait_state = {
+        .source = "pgraph-notify",
+        .op = "notify-error-raise",
+        .seq = count,
+        .method = method,
+        .parameter = parameter,
+        .dma_get = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+        .dma_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
+        .dma_state_method =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+        .dma_state_count =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+        .pmc_pending = d->pmc.pending_interrupts,
+        .pmc_enabled = d->pmc.enabled_interrupts,
+        .pfifo_pending = d->pfifo.pending_interrupts,
+        .pfifo_enabled = d->pfifo.enabled_interrupts,
+        .pcrtc_pending = d->pcrtc.pending_interrupts,
+        .pcrtc_enabled = d->pcrtc.enabled_interrupts,
+        .pgraph_pending = pg->pending_interrupts,
+        .pgraph_enabled = pg->enabled_interrupts,
+        .pfifo_known = false,
+        .fifo_access = (fifo & NV_PGRAPH_FIFO_ACCESS) != 0,
+        .pgraph_waiting_flip = pg->waiting_for_flip,
+        .pgraph_waiting_nop = pg->waiting_for_nop,
+        .pgraph_waiting_context = pg->waiting_for_context_switch,
+    };
+    xemu_xbe_boot_trace_observe_nv2a_wait_state(&wait_state);
+
+    fprintf(stderr,
+            "BOOT_MARK b6 pgraph=notify-error context=%s"
+            " seq=%" PRIu64
+            " op=notify-error-raise"
+            " channel=%u"
+            " ctx_channel=%u"
+            " subchannel=%u"
+            " method=0x%04x"
+            " parameter=0x%08x"
+            " pending_before=0x%08x"
+            " enabled_before=0x%08x"
+            " pending_after=0x%08x"
+            " enabled_after=0x%08x"
+            " pmc_pending_before=0x%08x"
+            " pmc_enabled_before=0x%08x"
+            " pmc_pending_current=0x%08x"
+            " pmc_enabled_current=0x%08x"
+            " pfifo_pending=0x%08x"
+            " pfifo_enabled=0x%08x"
+            " pcrtc_pending=0x%08x"
+            " pcrtc_enabled=0x%08x"
+            " dma_get=0x%08x"
+            " dma_put=0x%08x"
+            " dma_state=0x%08x"
+            " dma_state_method=0x%04x"
+            " dma_state_count=%u"
+            " dma_state_type=%u"
+            " dma_state_subchannel=%u"
+            " fifo=0x%08x"
+            " fifo_access=%s"
+            " waiting_flip=%s"
+            " waiting_nop=%s"
+            " waiting_context=%s"
+            " ctx_control=0x%08x"
+            " ctx_user=0x%08x"
+            " trapped_addr=0x%08x"
+            " trapped_data=0x%08x"
+            " nsource=0x%08x\n",
+            pgraph_boot_trace_context(), count, channel_id,
+            GET_MASK(ctx_user, NV_PGRAPH_CTX_USER_CHID), subchannel, method,
+            parameter, before->pgraph_pending, before->pgraph_enabled,
+            pg->pending_interrupts, pg->enabled_interrupts,
+            before->pmc_pending, before->pmc_enabled,
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts,
+            d->pfifo.pending_interrupts, d->pfifo.enabled_interrupts,
+            d->pcrtc.pending_interrupts, d->pcrtc.enabled_interrupts,
+            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+            d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT], dma_state,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_SUBCHANNEL),
+            fifo, (fifo & NV_PGRAPH_FIFO_ACCESS) ? "yes" : "no",
+            pg->waiting_for_flip ? "yes" : "no",
+            pg->waiting_for_nop ? "yes" : "no",
+            pg->waiting_for_context_switch ? "yes" : "no",
+            ctx_control, ctx_user, trapped_addr, trapped_data, nsource);
+}
+
+static const char *pgraph_method_boot_trace_name(unsigned int graphics_class,
+                                                 unsigned int method,
+                                                 uint32_t *base)
+{
+    *base = method;
+
+    if (graphics_class == NV_KELVIN_PRIMITIVE) {
+        int idx = METHOD_ADDR_TO_INDEX(method);
+
+        if (idx < ARRAY_SIZE(pgraph_kelvin_methods) &&
+            pgraph_kelvin_methods[idx].handler) {
+            *base = pgraph_kelvin_methods[idx].base;
+            return pgraph_kelvin_methods[idx].name;
+        }
+    }
+
+    return "?";
+}
+
+static uint32_t pgraph_method_window_start(void)
+{
+    static bool initialized;
+    static uint32_t start = XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_START;
+    const char *value;
+    char *end = NULL;
+    uint64_t parsed;
+
+    if (initialized) {
+        return start;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_START");
+    if (!value || !value[0]) {
+        return start;
+    }
+
+    parsed = g_ascii_strtoull(value, &end, 0);
+    if (end == value || parsed > UINT32_MAX) {
+        start = XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_START;
+    } else {
+        start = parsed;
+    }
+
+    return start;
+}
+
+static int64_t pgraph_method_window_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_LIMIT;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PGRAPH_METHOD_WINDOW_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        limit = XEMU_NV2A_PGRAPH_METHOD_WINDOW_DEFAULT_LIMIT;
+    }
+
+    return limit;
+}
+
+static void pgraph_boot_trace_method_window(NV2AState *d, const char *phase,
+                                            unsigned int subchannel,
+                                            unsigned int graphics_class,
+                                            unsigned int method,
+                                            uint32_t parameter,
+                                            size_t num_words_available,
+                                            size_t max_lookahead_words,
+                                            bool inc,
+                                            int num_processed)
+{
+    static uint64_t count;
+    int64_t limit;
+    PGRAPHState *pg = &d->pgraph;
+    uint32_t dma_get = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
+
+    limit = pgraph_method_window_limit();
+    if (limit == 0 || count >= (uint64_t)limit ||
+        dma_get < pgraph_method_window_start()) {
+        return;
+    }
+    count++;
+
+    uint32_t method_base = method;
+    const char *method_name =
+        pgraph_method_boot_trace_name(graphics_class, method, &method_base);
+    uint32_t method_offset = method - method_base;
+    uint32_t ctx_user = pgraph_reg_r(pg, NV_PGRAPH_CTX_USER);
+    uint32_t ctx_control = pgraph_reg_r(pg, NV_PGRAPH_CTX_CONTROL);
+    uint32_t ctx_switch1 = pgraph_reg_r(pg, NV_PGRAPH_CTX_SWITCH1);
+    uint32_t fifo = pgraph_reg_r(pg, NV_PGRAPH_FIFO);
+    uint32_t surface = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
+    uint32_t nsource = pgraph_reg_r(pg, NV_PGRAPH_NSOURCE);
+    uint32_t trapped_addr = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_ADDR);
+    uint32_t trapped_data = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_DATA_LOW);
+    uint32_t dma_state = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    XemuXbeBootTraceNv2aWaitState wait_state = {
+        .source = "pgraph-method-window",
+        .op = phase,
+        .seq = count,
+        .method = method,
+        .parameter = parameter,
+        .dma_get = dma_get,
+        .dma_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
+        .dma_state_method =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+        .dma_state_count =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+        .pmc_pending = d->pmc.pending_interrupts,
+        .pmc_enabled = d->pmc.enabled_interrupts,
+        .pfifo_pending = d->pfifo.pending_interrupts,
+        .pfifo_enabled = d->pfifo.enabled_interrupts,
+        .pcrtc_pending = d->pcrtc.pending_interrupts,
+        .pcrtc_enabled = d->pcrtc.enabled_interrupts,
+        .pgraph_pending = pg->pending_interrupts,
+        .pgraph_enabled = pg->enabled_interrupts,
+        .pfifo_known = false,
+        .fifo_access = (fifo & NV_PGRAPH_FIFO_ACCESS) != 0,
+        .pgraph_waiting_flip = pg->waiting_for_flip,
+        .pgraph_waiting_nop = pg->waiting_for_nop,
+        .pgraph_waiting_context = pg->waiting_for_context_switch,
+    };
+    xemu_xbe_boot_trace_observe_nv2a_wait_state(&wait_state);
+
+    fprintf(stderr,
+            "BOOT_MARK b6 pgraph=method-window context=%s"
+            " seq=%" PRIu64
+            " phase=%s"
+            " window_start=0x%08x"
+            " subchannel=%u"
+            " graphics_class=0x%03x"
+            " method=0x%04x"
+            " method_base=0x%04x"
+            " method_offset=0x%04x"
+            " method_name=%s"
+            " parameter=0x%08x"
+            " available=%zu"
+            " max_lookahead=%zu"
+            " inc=%s"
+            " processed=%d"
+            " pending=0x%08x"
+            " enabled=0x%08x"
+            " waiting_flip=%s"
+            " waiting_nop=%s"
+            " waiting_context=%s"
+            " fifo=0x%08x"
+            " fifo_access=%s"
+            " dma_get=0x%08x"
+            " dma_put=0x%08x"
+            " dma_state_method=0x%04x"
+            " dma_state_count=%u"
+            " dma_state_type=%u"
+            " dma_state_subchannel=%u"
+            " ctx_control=0x%08x"
+            " ctx_user=0x%08x"
+            " ctx_channel=%u"
+            " ctx_switch1=0x%08x"
+            " surface=0x%08x"
+            " surface_read=%u"
+            " surface_write=%u"
+            " surface_modulo=%u"
+            " nsource=0x%08x"
+            " trapped_addr=0x%08x"
+            " trapped_data=0x%08x"
+            " pmc_pending=0x%08x"
+            " pmc_enabled=0x%08x\n",
+            pgraph_boot_trace_context(), count, phase,
+            pgraph_method_window_start(), subchannel, graphics_class, method,
+            method_base, method_offset, method_name, parameter,
+            num_words_available, max_lookahead_words,
+            inc ? "yes" : "no", num_processed, pg->pending_interrupts,
+            pg->enabled_interrupts,
+            pg->waiting_for_flip ? "yes" : "no",
+            pg->waiting_for_nop ? "yes" : "no",
+            pg->waiting_for_context_switch ? "yes" : "no",
+            fifo,
+            (fifo & NV_PGRAPH_FIFO_ACCESS) ? "yes" : "no",
+            dma_get, d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_SUBCHANNEL),
+            ctx_control, ctx_user,
+            GET_MASK(ctx_user, NV_PGRAPH_CTX_USER_CHID), ctx_switch1, surface,
+            GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D),
+            GET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D),
+            GET_MASK(surface, NV_PGRAPH_SURFACE_MODULO_3D),
+            nsource, trapped_addr, trapped_data,
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
+}
+
+static void pgraph_boot_trace_method(NV2AState *d, const char *phase,
+                                     unsigned int subchannel,
+                                     unsigned int graphics_class,
+                                     unsigned int method,
+                                     uint32_t parameter,
+                                     size_t num_words_available,
+                                     size_t max_lookahead_words,
+                                     bool inc,
+                                     int num_processed)
+{
+    static uint64_t count;
+    int64_t limit;
+    PGRAPHState *pg = &d->pgraph;
+
+    if (!pgraph_boot_trace_enabled() ||
+        !xemu_xbe_boot_trace_dashboard_observed()) {
+        return;
+    }
+
+    pgraph_boot_trace_method_window(d, phase, subchannel, graphics_class,
+                                    method, parameter, num_words_available,
+                                    max_lookahead_words, inc, num_processed);
+
+    limit = pgraph_method_trace_limit();
+    if (limit == 0 || count >= (uint64_t)limit) {
+        return;
+    }
+    count++;
+
+    uint32_t method_base = method;
+    const char *method_name =
+        pgraph_method_boot_trace_name(graphics_class, method, &method_base);
+    uint32_t method_offset = method - method_base;
+    uint32_t ctx_user = pgraph_reg_r(pg, NV_PGRAPH_CTX_USER);
+    uint32_t ctx_control = pgraph_reg_r(pg, NV_PGRAPH_CTX_CONTROL);
+    uint32_t ctx_switch1 = pgraph_reg_r(pg, NV_PGRAPH_CTX_SWITCH1);
+    uint32_t fifo = pgraph_reg_r(pg, NV_PGRAPH_FIFO);
+    uint32_t surface = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
+    uint32_t nsource = pgraph_reg_r(pg, NV_PGRAPH_NSOURCE);
+    uint32_t trapped_addr = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_ADDR);
+    uint32_t trapped_data = pgraph_reg_r(pg, NV_PGRAPH_TRAPPED_DATA_LOW);
+    uint32_t dma_state = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    XemuXbeBootTraceNv2aWaitState wait_state = {
+        .source = "pgraph-method",
+        .op = phase,
+        .seq = count,
+        .method = method,
+        .parameter = parameter,
+        .dma_get = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
+        .dma_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
+        .dma_state_method =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+        .dma_state_count =
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+        .pmc_pending = d->pmc.pending_interrupts,
+        .pmc_enabled = d->pmc.enabled_interrupts,
+        .pfifo_pending = d->pfifo.pending_interrupts,
+        .pfifo_enabled = d->pfifo.enabled_interrupts,
+        .pcrtc_pending = d->pcrtc.pending_interrupts,
+        .pcrtc_enabled = d->pcrtc.enabled_interrupts,
+        .pgraph_pending = pg->pending_interrupts,
+        .pgraph_enabled = pg->enabled_interrupts,
+        .pfifo_known = false,
+        .fifo_access = (fifo & NV_PGRAPH_FIFO_ACCESS) != 0,
+        .pgraph_waiting_flip = pg->waiting_for_flip,
+        .pgraph_waiting_nop = pg->waiting_for_nop,
+        .pgraph_waiting_context = pg->waiting_for_context_switch,
+    };
+    xemu_xbe_boot_trace_observe_nv2a_wait_state(&wait_state);
+
+    fprintf(stderr,
+            "BOOT_MARK b6 pgraph=method context=%s"
+            " seq=%" PRIu64
+            " phase=%s"
+            " subchannel=%u"
+            " graphics_class=0x%03x"
+            " method=0x%04x"
+            " method_base=0x%04x"
+            " method_offset=0x%04x"
+            " method_name=%s"
+            " parameter=0x%08x"
+            " available=%zu"
+            " max_lookahead=%zu"
+            " inc=%s"
+            " processed=%d"
+            " pending=0x%08x"
+            " enabled=0x%08x"
+            " waiting_flip=%s"
+            " waiting_nop=%s"
+            " waiting_context=%s"
+            " fifo=0x%08x"
+            " fifo_access=%s"
+            " ctx_control=0x%08x"
+            " ctx_user=0x%08x"
+            " ctx_channel=%u"
+            " ctx_switch1=0x%08x"
+            " surface=0x%08x"
+            " surface_read=%u"
+            " surface_write=%u"
+            " surface_modulo=%u"
+            " nsource=0x%08x"
+            " trapped_addr=0x%08x"
+            " trapped_data=0x%08x"
+            " pmc_pending=0x%08x"
+            " pmc_enabled=0x%08x\n",
+            pgraph_boot_trace_context(), count, phase, subchannel,
+            graphics_class, method, method_base, method_offset, method_name,
+            parameter, num_words_available, max_lookahead_words,
+            inc ? "yes" : "no", num_processed, pg->pending_interrupts,
+            pg->enabled_interrupts,
+            pg->waiting_for_flip ? "yes" : "no",
+            pg->waiting_for_nop ? "yes" : "no",
+            pg->waiting_for_context_switch ? "yes" : "no",
+            fifo,
+            (fifo & NV_PGRAPH_FIFO_ACCESS) ? "yes" : "no",
+            ctx_control, ctx_user,
+            GET_MASK(ctx_user, NV_PGRAPH_CTX_USER_CHID), ctx_switch1, surface,
+            GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D),
+            GET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D),
+            GET_MASK(surface, NV_PGRAPH_SURFACE_MODULO_3D),
+            nsource, trapped_addr, trapped_data,
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
+}
+
 static void pgraph_method_inc(MethodFunc handler, uint32_t end,
                               METHOD_HANDLER_ARG_DECL)
 {
@@ -670,6 +1403,9 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
                                        NV_PGRAPH_CTX_SWITCH1_GRCLASS);
 
     pgraph_method_log(subchannel, graphics_class, method, parameter);
+    pgraph_boot_trace_method(d, "enter", subchannel, graphics_class, method,
+                             parameter, num_words_available,
+                             max_lookahead_words, inc, -1);
 
     if (subchannel != 0) {
         // catches context switching issues on xbox d3d
@@ -807,11 +1543,17 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
         goto unhandled;
     }
 
+    pgraph_boot_trace_method(d, "exit", subchannel, graphics_class, method,
+                             parameter, num_words_available,
+                             max_lookahead_words, inc, num_processed);
     return num_processed;
 
 unhandled:
     trace_nv2a_pgraph_method_unhandled(subchannel, graphics_class,
                                            method, parameter);
+    pgraph_boot_trace_method(d, "unhandled", subchannel, graphics_class,
+                             method, parameter, num_words_available,
+                             max_lookahead_words, inc, num_processed);
     return num_processed;
 }
 
@@ -846,12 +1588,18 @@ DEF_METHOD(NV097, NO_OPERATION)
     pgraph_reg_w(pg, NV_PGRAPH_TRAPPED_DATA_LOW, parameter);
     pgraph_reg_w(pg, NV_PGRAPH_NSOURCE,
                  NV_PGRAPH_NSOURCE_NOTIFICATION); /* TODO: check this */
+    NV2AIrqTraceState irq_before;
+
+    nv2a_irq_trace_capture(d, &irq_before);
     pg->pending_interrupts |= NV_PGRAPH_INTR_ERROR;
     pg->waiting_for_nop = true;
-
+    pgraph_boot_trace_notify_error(d, channel_id, subchannel, method,
+                                   parameter, &irq_before);
     qemu_mutex_unlock(&pg->lock);
     bql_lock();
     nv2a_update_irq(d);
+    nv2a_boot_trace_irq_source(d, "pgraph", "notify-error-raise",
+                               method, &irq_before);
     bql_unlock();
     qemu_mutex_lock(&pg->lock);
 }

@@ -155,6 +155,20 @@ run_all() {
         scripts/xbox-display-capture-evidence-check-selftest.sh \
         scripts/xbox-browser-runtime-evidence-check.sh \
         scripts/xbox-browser-runtime-evidence-check-selftest.sh \
+        scripts/xbox-native-reference-evidence-check.sh \
+        scripts/xbox-native-reference-evidence-check-selftest.sh \
+        scripts/xbox-dashboard-loaded-evidence-check.sh \
+        scripts/xbox-dashboard-loaded-evidence-check-selftest.sh \
+        scripts/xbox-native-actual-xbe-execution-check-selftest.sh \
+        scripts/xbox-native-headless-handoff-check-selftest.sh \
+        scripts/xbox-dashboard-xbe-read-evidence-selftest.sh \
+        scripts/xbox-dashboard-xbe-hash-evidence-selftest.sh \
+        scripts/xbox-pgraph-command-stream-compare-selftest.sh \
+        scripts/xbox-post-command-handoff-compare-selftest.sh \
+        scripts/xbox-post-command-loop-clusters-selftest.sh \
+        scripts/xbox-post-service-memory-poll-compare-selftest.sh \
+        scripts/xbox-pre-service-tick-gap-compare-selftest.sh \
+        scripts/xbox-pcrtc-vblank-divergence-selftest.sh \
         scripts/xbox-browser-host-check.sh \
         scripts/xbox-browser-runtime-smoke.sh \
         scripts/xbox-browser-runtime-smoke-selftest.sh \
@@ -174,13 +188,25 @@ run_all() {
         scripts/xbox-boot-evidence-report.sh \
         scripts/xbox-boot-next-step.sh \
         scripts/xbox-boot-next-step-selftest.sh \
+        scripts/xbox-b6-current-boundary.sh \
         scripts/docker-build-xemu.sh \
         scripts/docker-build-xemu-wasm.sh \
         scripts/docker-build-wasm-sysroot.sh \
         scripts/xbox-docker-build-check.sh
 
+    run_step python-syntax python3 -m py_compile \
+        scripts/xbox-dashboard-xbe-read-evidence.py \
+        scripts/xbox-dashboard-xbe-hash-evidence.py \
+        scripts/xbox-native-actual-xbe-execution-check.py \
+        scripts/xbox-native-headless-handoff-check.py \
+        scripts/xbox-pgraph-command-stream-compare.py \
+        scripts/xbox-post-command-handoff-compare.py \
+        scripts/xbox-post-command-loop-clusters.py \
+        scripts/xbox-post-service-memory-poll-compare.py \
+        scripts/xbox-pre-service-tick-gap-compare.py
     run_step browser-js-syntax node --check browser/xbox-boot/main.js
     run_step browser-worker-syntax node --check browser/xbox-boot/worker.js
+    run_step browser-firefox-bidi-syntax node --check scripts/xbox-browser-runtime-firefox-bidi.mjs
     run_step docker-build-check "${repo_root}/scripts/xbox-docker-build-check.sh"
     run_step wasm-profile "${repo_root}/scripts/xbox-verify-wasm-profile.sh" "${wasm_build}"
     run_step fixture-privacy "${repo_root}/scripts/xbox-fixture-privacy-check.sh"
@@ -202,6 +228,18 @@ run_all() {
     run_step next-step-selftest "${repo_root}/scripts/xbox-boot-next-step-selftest.sh"
     run_step display-capture-evidence "${repo_root}/scripts/xbox-display-capture-evidence-check-selftest.sh"
     run_step browser-runtime-evidence "${repo_root}/scripts/xbox-browser-runtime-evidence-check-selftest.sh"
+    run_step native-reference-evidence "${repo_root}/scripts/xbox-native-reference-evidence-check-selftest.sh"
+    run_step dashboard-loaded-evidence "${repo_root}/scripts/xbox-dashboard-loaded-evidence-check-selftest.sh"
+    run_step native-actual-xbe-execution "${repo_root}/scripts/xbox-native-actual-xbe-execution-check-selftest.sh"
+    run_step native-headless-handoff "${repo_root}/scripts/xbox-native-headless-handoff-check-selftest.sh"
+    run_step dashboard-xbe-read-evidence "${repo_root}/scripts/xbox-dashboard-xbe-read-evidence-selftest.sh"
+    run_step dashboard-xbe-hash-evidence "${repo_root}/scripts/xbox-dashboard-xbe-hash-evidence-selftest.sh"
+    run_step pgraph-command-stream-compare "${repo_root}/scripts/xbox-pgraph-command-stream-compare-selftest.sh"
+    run_step post-command-handoff-compare "${repo_root}/scripts/xbox-post-command-handoff-compare-selftest.sh"
+    run_step post-command-loop-clusters "${repo_root}/scripts/xbox-post-command-loop-clusters-selftest.sh"
+    run_step post-service-memory-poll-compare "${repo_root}/scripts/xbox-post-service-memory-poll-compare-selftest.sh"
+    run_step pre-service-tick-gap-compare "${repo_root}/scripts/xbox-pre-service-tick-gap-compare-selftest.sh"
+    run_step pcrtc-vblank-divergence "${repo_root}/scripts/xbox-pcrtc-vblank-divergence-selftest.sh"
     run_step browser-runtime-smoke-selftest "${repo_root}/scripts/xbox-browser-runtime-smoke-selftest.sh"
 
     if [ "${skip_host}" = "1" ]; then

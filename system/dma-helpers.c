@@ -73,6 +73,92 @@ typedef struct {
     void *io_func_opaque;
 } DMAAIOCB;
 
+static bool dma_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static int64_t dma_boot_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = 256;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BOOT_TRACE_DMA_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_BOOT_TRACE_DMA_LIMIT='%s'; using 256\n",
+                value);
+        limit = 256;
+    }
+
+    return limit;
+}
+
+static bool dma_boot_mark_allowed(void)
+{
+    static uint64_t mark_count;
+    int64_t limit;
+
+    if (!dma_boot_trace_enabled()) {
+        return false;
+    }
+
+    limit = dma_boot_trace_limit();
+    if (limit == 0 || mark_count >= limit) {
+        return false;
+    }
+
+    mark_count++;
+    return true;
+}
+
+static bool dma_boot_poll_after_submit(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    const char *value = getenv("XEMU_BROWSER_BOOT_POLL_AIO_AFTER_DMA_SUBMIT");
+
+    return value && value[0] && strcmp(value, "0");
+#else
+    return false;
+#endif
+}
+
+static void dma_boot_mark(DMAAIOCB *dbs, const char *event, int ret)
+{
+    if (!dma_boot_mark_allowed()) {
+        return;
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b3 dma_blk=%s ret=%d dir=%s offset=%" PRIu64
+            " align=%u sg_index=%d sg_byte=%" PRIu64
+            " sg_n=%d sg_size=%" PRIu64 " iov_size=%zu acb=%p bh=%p\n",
+            event, ret,
+            dbs->dir == DMA_DIRECTION_TO_DEVICE ? "to-device" : "from-device",
+            dbs->offset, dbs->align, dbs->sg_cur_index,
+            (uint64_t)dbs->sg_cur_byte, dbs->sg ? dbs->sg->nsg : -1,
+            dbs->sg ? (uint64_t)dbs->sg->size : 0,
+            dbs->iov.size, dbs->acb, dbs->bh);
+}
+
 static void dma_blk_cb(void *opaque, int ret);
 
 static void reschedule_dma(void *opaque)
@@ -80,6 +166,7 @@ static void reschedule_dma(void *opaque)
     DMAAIOCB *dbs = (DMAAIOCB *)opaque;
 
     assert(!dbs->acb && dbs->bh);
+    dma_boot_mark(dbs, "reschedule", 0);
     qemu_bh_delete(dbs->bh);
     dbs->bh = NULL;
     dma_blk_cb(dbs, 0);
@@ -102,6 +189,7 @@ static void dma_complete(DMAAIOCB *dbs, int ret)
     trace_dma_complete(dbs, ret, dbs->common.cb);
 
     assert(!dbs->acb && !dbs->bh);
+    dma_boot_mark(dbs, "complete", ret);
     dma_blk_unmap(dbs);
     if (dbs->common.cb) {
         dbs->common.cb(dbs->common.opaque, ret);
@@ -121,6 +209,7 @@ static void dma_blk_cb(void *opaque, int ret)
 
     /* DMAAIOCB is not thread-safe and must be accessed only from dbs->ctx */
     assert(ctx == qemu_get_current_aio_context());
+    dma_boot_mark(dbs, "callback", ret);
 
     dbs->acb = NULL;
     dbs->offset += dbs->iov.size;
@@ -168,6 +257,7 @@ static void dma_blk_cb(void *opaque, int ret)
 
     if (dbs->iov.size == 0) {
         trace_dma_map_wait(dbs);
+        dma_boot_mark(dbs, "map-wait", ret);
         dbs->bh = aio_bh_new(ctx, reschedule_dma, dbs);
         address_space_register_map_client(dbs->sg->as, dbs->bh);
         return;
@@ -178,9 +268,15 @@ static void dma_blk_cb(void *opaque, int ret)
                                 QEMU_ALIGN_DOWN(dbs->iov.size, dbs->align));
     }
 
+    dma_boot_mark(dbs, "submit", ret);
     dbs->acb = dbs->io_func(dbs->offset, &dbs->iov,
                             dma_blk_cb, dbs, dbs->io_func_opaque);
     assert(dbs->acb);
+    dma_boot_mark(dbs, "submitted", ret);
+    if (dma_boot_poll_after_submit()) {
+        dma_boot_mark(dbs, "poll-aio-after-submit", ret);
+        aio_poll(ctx, false);
+    }
 }
 
 static void dma_aio_cancel(BlockAIOCB *acb)
@@ -233,6 +329,7 @@ BlockAIOCB *dma_blk_io(
     dbs->io_func_opaque = io_func_opaque;
     dbs->bh = NULL;
     qemu_iovec_init(&dbs->iov, sg->nsg);
+    dma_boot_mark(dbs, "start", 0);
     dma_blk_cb(dbs, 0);
     return &dbs->common;
 }
@@ -344,4 +441,3 @@ uint64_t dma_aligned_pow2_mask(uint64_t start, uint64_t end, int max_addr_bits)
         return (1ULL << (63 - clz64(addr_mask + 1))) - 1;
     }
 }
-

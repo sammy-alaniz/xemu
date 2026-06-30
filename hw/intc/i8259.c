@@ -31,6 +31,7 @@
 #include "hw/isa/i8259_internal.h"
 #include "trace.h"
 #include "qom/object.h"
+#include "xemu-xbe.h"
 
 /*#define DEBUG_IRQ_LATENCY*/
 
@@ -120,6 +121,8 @@ static void pic_set_irq(void *opaque, int irq, int level)
     PICCommonState *s = opaque;
     int mask = 1 << irq;
     int irq_index = s->master ? irq : irq + 8;
+    uint32_t irr_before = s->irr;
+    uint32_t last_irr_before = s->last_irr;
 
     trace_pic_set_irq(s->master, irq, level);
     pic_stat_update_irq(irq_index, level);
@@ -153,6 +156,11 @@ static void pic_set_irq(void *opaque, int irq, int level)
             s->last_irr &= ~mask;
         }
     }
+    xemu_xbe_boot_trace_observe_pic_irq_line(s->master != 0, irq, level,
+                                             irr_before, s->irr,
+                                             last_irr_before, s->last_irr,
+                                             s->imr, s->isr, s->elcr,
+                                             pic_get_irq(s));
     pic_update_irq(s);
 }
 
@@ -176,12 +184,20 @@ static void pic_intack(PICCommonState *s, int irq)
 int pic_read_irq(PICCommonState *s)
 {
     int irq, intno;
+    int guest_irq = -1;
+    int master_irq = -1;
+    int slave_irq = -1;
+    uint32_t master_irr_before = s->irr;
+    uint32_t master_isr_before = s->isr;
+    uint32_t slave_irr_before = slave_pic ? slave_pic->irr : 0;
+    uint32_t slave_isr_before = slave_pic ? slave_pic->isr : 0;
 
     irq = pic_get_irq(s);
     if (irq >= 0) {
         int irq2;
 
         if (irq == 2) {
+            master_irq = irq;
             irq2 = pic_get_irq(slave_pic);
             if (irq2 >= 0) {
                 pic_intack(slave_pic, irq2);
@@ -191,15 +207,20 @@ int pic_read_irq(PICCommonState *s)
             }
             intno = slave_pic->irq_base + irq2;
             pic_intack(s, irq);
+            slave_irq = irq2;
             irq = irq2 + 8;
         } else {
             intno = s->irq_base + irq;
             pic_intack(s, irq);
+            master_irq = irq;
         }
+        guest_irq = irq;
     } else {
         /* spurious IRQ on host controller */
         irq = 7;
         intno = s->irq_base + irq;
+        guest_irq = irq;
+        master_irq = irq;
     }
 
 #ifdef DEBUG_IRQ_LATENCY
@@ -210,6 +231,14 @@ int pic_read_irq(PICCommonState *s)
 #endif
 
     trace_pic_interrupt(irq, intno);
+    xemu_xbe_boot_trace_observe_pic_irq_ack(
+        intno, guest_irq, master_irq, slave_irq,
+        master_irr_before, s->irr, s->imr,
+        master_isr_before, s->isr, s->elcr,
+        slave_irr_before, slave_pic ? slave_pic->irr : 0,
+        slave_pic ? slave_pic->imr : 0,
+        slave_isr_before, slave_pic ? slave_pic->isr : 0,
+        slave_pic ? slave_pic->elcr : 0);
     return intno;
 }
 

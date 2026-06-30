@@ -58,7 +58,7 @@ status_for() {
     local item="$1"
     local line
 
-    line="$(grep "^BOOT_EVIDENCE item=${item} " "${tmp_summary}" || true)"
+    line="$(line_for "${item}")"
     if [ -z "${line}" ]; then
         printf 'missing'
         return
@@ -66,17 +66,42 @@ status_for() {
     value_for "${line}" status
 }
 
+line_for() {
+    local item="$1"
+
+    grep "^BOOT_EVIDENCE item=${item} " "${tmp_summary}" || true
+}
+
+repo_relative_path() {
+    local path="$1"
+
+    case "${path}" in
+        "${repo_root}/"*)
+            printf '%s' "${path#"${repo_root}/"}"
+            ;;
+        *)
+            printf '%s' "${path}"
+            ;;
+    esac
+}
+
 summary_line="$(grep '^BOOT_EVIDENCE_SUMMARY ' "${tmp_summary}")"
 summary_result="$(value_for "${summary_line}" result)"
 next_step="$(value_for "${summary_line}" next)"
 real_fixture_ready="$(status_for real_fixture_ready)"
 real_b3_assets="$(status_for b3_real_assets)"
+real_b6_dashboard="$(status_for b6_dashboard_loaded)"
+real_b6_dashboard_line="$(line_for b6_dashboard_loaded)"
+real_b6_dashboard_log="$(value_for "${real_b6_dashboard_line}" log)"
 synthetic_gate="$(status_for synthetic_gate)"
 
 result="next"
 reason="${next_step}"
 command=""
 command_id=""
+diagnostic_command=""
+diagnostic_command_id="none"
+diagnostic_reason="none"
 
 json_string() {
     local value="$1"
@@ -161,6 +186,98 @@ else
             command="scripts/xbox-browser-runtime-evidence-check.sh build-real-b3-matrix/real-b3-matrix.log"
             command_id="b5-browser-evidence"
             ;;
+        b6-dashboard-loaded)
+            if [ "${real_b6_dashboard}" = "missing" ]; then
+                reason="b6-dashboard-evidence-missing"
+            else
+                reason="b6-dashboard-evidence-failed"
+            fi
+            preferred_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log"
+            if [ -f "${preferred_b6_dashboard_log}" ]; then
+                real_b6_dashboard_log="${preferred_b6_dashboard_log}"
+            fi
+            if [ -z "${real_b6_dashboard_log}" ]; then
+                real_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log"
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-v2-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-ready-edge-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-precommit-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-memory-watch-write-0x3a890-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-memory-sample-0x3a890-full-baseline-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-pretransition-then-empty-filtered-limit4-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-no-tcg-limit4-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-no-tcg-limit4-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-no-tcg-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-no-tcg-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-headless-gate-bounded-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-section-map-v2-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-section-map-v2.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-section-map-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-section-map-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-timeout-300s-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-timeout-300s-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-v1.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-pm-ac97-callback-v1-combined.log"
+                fi
+                if [ ! -f "${real_b6_dashboard_log}" ]; then
+                    real_b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-irq-source-v6-combined.log"
+                fi
+            fi
+            b6_native_log="${real_dir}/native-headless-graphic-update-v2/boot-smoke.log"
+            if [ ! -f "${b6_native_log}" ]; then
+                b6_native_log="${real_dir}/native-post-iret-flow-v1/boot-smoke.log"
+            fi
+            command="scripts/xbox-dashboard-loaded-evidence-check.sh $(repo_relative_path "${real_b6_dashboard_log}")"
+            command_id="b6-dashboard-loaded-evidence"
+            diagnostic_command="scripts/xbox-b6-current-boundary.sh --native-log $(repo_relative_path "${b6_native_log}") --browser-log $(repo_relative_path "${real_b6_dashboard_log}")"
+            diagnostic_command_id="b6-current-boundary"
+            diagnostic_reason="converge-browser-post-service-flow"
+            ;;
         done)
             result="done"
             reason="complete"
@@ -176,6 +293,9 @@ else
     esac
 fi
 
-printf 'XBOX_BOOT_NEXT result=%s next=%s reason=%s command_id=%s command_json=%s command=%s synthetic_dir=%s real_dir=%s\n' \
+printf 'XBOX_BOOT_NEXT result=%s next=%s reason=%s command_id=%s command_json=%s command=%s diagnostic_command_id=%s diagnostic_reason=%s diagnostic_command_json=%s diagnostic_command=%s synthetic_dir=%s real_dir=%s\n' \
     "${result}" "${next_step:-unknown}" "${reason}" "${command_id}" \
-    "$(json_string "${command}")" "${command}" "${synthetic_dir}" "${real_dir}"
+    "$(json_string "${command}")" "${command}" \
+    "${diagnostic_command_id}" "${diagnostic_reason}" \
+    "$(json_string "${diagnostic_command}")" "${diagnostic_command}" \
+    "${synthetic_dir}" "${real_dir}"

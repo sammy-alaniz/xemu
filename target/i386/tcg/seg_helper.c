@@ -30,6 +30,9 @@
 #include "access.h"
 #include "tcg-cpu.h"
 #include "qemu/plugin.h"
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+#include "xemu-xbe.h"
+#endif
 
 #ifdef TARGET_X86_64
 #define SET_ESP(val, sp_mask)                                   \
@@ -2251,6 +2254,10 @@ void helper_iret_protected(CPUX86State *env, int shift, int next_eip)
     int tss_selector, type;
     uint32_t e1, e2;
 
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_boot_trace_observe_iret("before", shift, next_eip);
+#endif
+
     /* specific case for TSS */
     if (env->eflags & NT_MASK) {
 #ifdef TARGET_X86_64
@@ -2276,6 +2283,9 @@ void helper_iret_protected(CPUX86State *env, int shift, int next_eip)
         helper_ret_protected(env, shift, 1, 0, GETPC());
     }
     env->hflags2 &= ~HF2_NMI_MASK;
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_boot_trace_observe_iret("after", shift, next_eip);
+#endif
 }
 
 void helper_lret_protected(CPUX86State *env, int shift, int addend)

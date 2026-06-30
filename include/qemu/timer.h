@@ -62,6 +62,8 @@ typedef enum {
  * The following attributes are available:
  *
  * QEMU_TIMER_ATTR_EXTERNAL: drives external subsystem
+ * QEMU_TIMER_ATTR_XEMU_TCG_PUMP: eligible for the xemu browser diagnostic
+ * TCG-side timer pump
  * QEMU_TIMER_ATTR_ALL: mask for all existing attributes
  *
  * Timers with this attribute do not recorded in rr mode, therefore it could be
@@ -70,6 +72,7 @@ typedef enum {
  */
 
 #define QEMU_TIMER_ATTR_EXTERNAL ((int)BIT(0))
+#define QEMU_TIMER_ATTR_XEMU_TCG_PUMP ((int)BIT(1))
 #define QEMU_TIMER_ATTR_ALL      0xffffffff
 
 typedef struct QEMUTimerList QEMUTimerList;
@@ -224,6 +227,38 @@ void qemu_clock_enable(QEMUClockType type, bool enabled);
  * Returns: true if any timer ran.
  */
 bool qemu_clock_run_timers(QEMUClockType type);
+
+/**
+ * qemu_clock_run_timers_with_attrs:
+ * @type: clock on which to operate
+ * @attr_mask: mask for the timer attributes being matched
+ * @required_attrs: required attribute bits after applying @attr_mask
+ *
+ * Run expired timers on the default timer list of @type only when
+ * (timer->attributes & @attr_mask) == @required_attrs.
+ *
+ * Returns: true if any timer ran.
+ */
+bool qemu_clock_run_timers_with_attrs(QEMUClockType type,
+                                      int attr_mask,
+                                      int required_attrs);
+
+/**
+ * qemu_clock_run_timers_with_attrs_limit:
+ * @type: clock on which to operate
+ * @attr_mask: mask for the timer attributes being matched
+ * @required_attrs: required attribute bits after applying @attr_mask
+ * @max_timers: maximum number of matching expired callbacks to run
+ *
+ * Bounded form of qemu_clock_run_timers_with_attrs(). A negative @max_timers
+ * runs all matching expired timers; zero runs none.
+ *
+ * Returns: true if any timer ran.
+ */
+bool qemu_clock_run_timers_with_attrs_limit(QEMUClockType type,
+                                            int attr_mask,
+                                            int required_attrs,
+                                            int max_timers);
 
 /**
  * qemu_clock_run_all_timers:

@@ -71,6 +71,19 @@ BROWSER_DISPLAY_CAPTURE result=pass nonempty=yes hash=0123456789abcdef0123456789
 EOF
 }
 
+write_b6_pass() {
+    local root="$1"
+
+    cat >"${root}/real/browser-runtime-firefox-bidi-pgraph-notify-probe-90s-combined.log" <<'EOF'
+BOOT_MARK b6 dashboard=xbe-read context=browser-runtime file=xboxdash.xbe path=xboxdash.xbe partition_lba=0 start_lba=1 sectors=1 file_size=512 first_cluster=2 cluster=2 read_index=1 read_lba=1 read_nsectors=1 overlap_lba=1 overlap_sectors=1 method=dma source=ide-read-log
+BOOT_MARK b6 dashboard=xbe-loaded context=browser-runtime guest_addr=0x00010000 image_size=4096 headers_size=512 entry=0x00010100 title_id=0xffff0002 source=virtual-header phys_addr=0x000e0000
+BOOT_MARK b6 dashboard=xbe-entry-probe context=browser-runtime status=ready guest_entry=0x00010100 image_pc=0x00010100 entry_offset=0x00000100 image_base=0x00010000 image_size=4096 relation=overlap distance=0 address_mode=direct entry_phys_mapped=yes entry_phys=0x00020100 image_phys_mapped=yes image_phys=0x00020100 phys_match=yes entry_code_read=yes entry_code_hash=0x0123456789abcdef entry_opcode=0x55 source=virtual-header
+BOOT_MARK b6 dashboard=xbe-executed context=browser-runtime guest_pc=0x00010100 image_base=0x00010000 image_size=4096 phys_match=yes section_index=0 section_flags=0x00000006 section_virtual_addr=0x00010000 section_virtual_end=0x00011000 source=tcg-tb
+NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless source=native-framebuffer hash=fedcba9876543210 width=640 height=480 dashboard=xbe-executed frame=1 build_id=synthetic
+BROWSER_DASHBOARD_CAPTURE result=pass native_ref_match=yes hash=0123456789abcdef native_hash=fedcba9876543210 source=browser-framebuffer width=640 height=480
+EOF
+}
+
 run_case() {
     local name="$1"
     local expected_status="$2"
@@ -116,9 +129,16 @@ EOF
 case_complete() {
     write_synthetic_pass "$1"
     write_complete_real "$1"
+    write_b6_pass "$1"
+}
+
+case_b6_incomplete() {
+    write_synthetic_pass "$1"
+    write_complete_real "$1"
 }
 
 run_case incomplete 1 'BOOT_COMPLETION_AUDIT_RESULT result=fail' case_incomplete
+run_case b6-incomplete 1 'BOOT_COMPLETION item=real_b6 result=fail' case_b6_incomplete
 run_case complete 0 'BOOT_COMPLETION_AUDIT_RESULT result=pass failed=0 next=done' case_complete
 
-printf 'BOOT_COMPLETION_AUDIT_SELFTEST_RESULT result=pass cases=2\n'
+printf 'BOOT_COMPLETION_AUDIT_SELFTEST_RESULT result=pass cases=3\n'

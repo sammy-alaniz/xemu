@@ -1198,6 +1198,7 @@ type_init(register_xemu_display);
 
 int gArgc;
 char **gArgv;
+static int qemu_initialized;
 
 static bool xemu_headless_boot_enabled(void);
 
@@ -1219,6 +1220,7 @@ static void *qemu_main(void *opaque)
 {
     xemu_boot_trace_mark("b0 thread=qemu-main started");
     qemu_init(gArgc, gArgv);
+    qatomic_set(&qemu_initialized, 1);
     exit_status = qemu_main_loop();
     qatomic_set(&qemu_exiting, true);
     bql_unlock();
@@ -1320,10 +1322,80 @@ static int64_t xemu_headless_boot_timeout_ms(void)
     return timeout_ms;
 }
 
+static bool xemu_headless_graphic_update_enabled(void)
+{
+    const char *value = getenv("XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE");
+
+    return value && value[0] && strcmp(value, "0");
+}
+
+static int64_t xemu_headless_graphic_update_interval_us(void)
+{
+    const char *value = getenv("XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE_INTERVAL_US");
+    char *end = NULL;
+    int64_t interval_us = 16667;
+
+    if (!value || !value[0]) {
+        return interval_us;
+    }
+
+    interval_us = g_ascii_strtoll(value, &end, 10);
+    if (end == value || interval_us <= 0) {
+        fprintf(stderr,
+                "Invalid XEMU_HEADLESS_BOOT_GRAPHIC_UPDATE_INTERVAL_US='%s';"
+                " using 16667 us\n",
+                value);
+        return 16667;
+    }
+
+    return interval_us;
+}
+
+static bool xemu_headless_trace_sample(uint64_t count)
+{
+    return count <= 8 || (count & (count - 1)) == 0;
+}
+
+static void xemu_headless_graphic_update(int64_t interval_us)
+{
+    static uint64_t update_count;
+    QemuConsole *con;
+    bool graphic = false;
+    bool updated = false;
+
+    bql_lock();
+    con = qemu_console_lookup_default();
+    if (con && qemu_console_is_graphic(con)) {
+        graphic = true;
+        graphic_hw_update(con);
+        updated = true;
+    }
+    bql_unlock();
+
+    update_count++;
+    if (xemu_boot_trace_enabled() &&
+        xemu_headless_trace_sample(update_count)) {
+        fprintf(stderr,
+                "BOOT_MARK b6 headless=graphic-update"
+                " context=native-headless"
+                " count=%" PRIu64
+                " updated=%s"
+                " graphic_console=%s"
+                " interval_us=%" PRId64 "\n",
+                update_count,
+                updated ? "yes" : "no",
+                graphic ? "yes" : "no",
+                interval_us);
+    }
+}
+
 int main(int argc, char **argv)
 {
     QemuThread thread;
     bool headless_boot = xemu_headless_boot_enabled();
+    bool headless_graphic_update = xemu_headless_graphic_update_enabled();
+    int64_t headless_graphic_update_interval_us =
+        xemu_headless_graphic_update_interval_us();
 
     setlocale(LC_NUMERIC, "C");
 
@@ -1412,10 +1484,22 @@ int main(int argc, char **argv)
     if (headless_boot) {
         int64_t timeout_ms = xemu_headless_boot_timeout_ms();
         int64_t start_us = g_get_monotonic_time();
+        int64_t last_graphic_update_us = 0;
         const char *reason = "shutdown";
 
         while (!qatomic_read(&qemu_exiting)) {
-            int64_t elapsed_ms = (g_get_monotonic_time() - start_us) / 1000;
+            int64_t now_us = g_get_monotonic_time();
+            int64_t elapsed_ms = (now_us - start_us) / 1000;
+
+            if (headless_graphic_update &&
+                qatomic_read(&qemu_initialized) &&
+                (last_graphic_update_us == 0 ||
+                 now_us - last_graphic_update_us >=
+                     headless_graphic_update_interval_us)) {
+                xemu_headless_graphic_update(
+                    headless_graphic_update_interval_us);
+                last_graphic_update_us = now_us;
+            }
 
             if (timeout_ms > 0 && elapsed_ms >= timeout_ms) {
                 reason = "timeout";
@@ -1423,7 +1507,7 @@ int main(int argc, char **argv)
                 break;
             }
 
-            g_usleep(50000);
+            g_usleep(headless_graphic_update ? 2000 : 50000);
         }
 
         qemu_thread_join(&thread);

@@ -1553,6 +1553,7 @@ typedef struct BlkAioEmAIOCB {
     BlockAIOCB common;
     BlkRwCo rwco;
     int64_t bytes;
+    const char *op;
     bool has_returned;
 } BlkAioEmAIOCB;
 
@@ -1560,12 +1561,89 @@ static const AIOCBInfo blk_aio_em_aiocb_info = {
     .aiocb_size         = sizeof(BlkAioEmAIOCB),
 };
 
+static bool blk_aio_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static int64_t blk_aio_boot_trace_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = 256;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BOOT_TRACE_BLK_AIO_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_BOOT_TRACE_BLK_AIO_LIMIT='%s'; using 256\n",
+                value);
+        limit = 256;
+    }
+
+    return limit;
+}
+
+static bool blk_aio_boot_mark_allowed(void)
+{
+    static uint64_t mark_count;
+    int64_t limit;
+
+    if (!blk_aio_boot_trace_enabled()) {
+        return false;
+    }
+
+    limit = blk_aio_boot_trace_limit();
+    if (limit == 0 || mark_count >= limit) {
+        return false;
+    }
+
+    mark_count++;
+    return true;
+}
+
+static void blk_aio_boot_mark(BlkAioEmAIOCB *acb, const char *event)
+{
+    if (!blk_aio_boot_mark_allowed()) {
+        return;
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b3 blk_aio=%s op=%s acb=%p blk=%p"
+            " offset=%" PRId64 " bytes=%" PRId64
+            " ret=%d flags=0x%x has_returned=%s opaque=%p\n",
+            event, acb->op ? acb->op : "unknown", (void *)acb,
+            (void *)acb->rwco.blk, acb->rwco.offset, acb->bytes,
+            acb->rwco.ret, (unsigned int)acb->rwco.flags,
+            acb->has_returned ? "yes" : "no", acb->common.opaque);
+}
+
 static void blk_aio_complete(BlkAioEmAIOCB *acb)
 {
+    blk_aio_boot_mark(acb, "complete-called");
     if (acb->has_returned) {
+        blk_aio_boot_mark(acb, "complete-callback");
         acb->common.cb(acb->common.opaque, acb->rwco.ret);
         blk_dec_in_flight(acb->rwco.blk);
         qemu_aio_unref(acb);
+    } else {
+        blk_aio_boot_mark(acb, "complete-deferred");
     }
 }
 
@@ -1573,13 +1651,14 @@ static void blk_aio_complete_bh(void *opaque)
 {
     BlkAioEmAIOCB *acb = opaque;
     assert(acb->has_returned);
+    blk_aio_boot_mark(acb, "complete-bh");
     blk_aio_complete(acb);
 }
 
 static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset,
                                 int64_t bytes,
                                 void *iobuf, CoroutineEntry co_entry,
-                                BdrvRequestFlags flags,
+                                BdrvRequestFlags flags, const char *op,
                                 BlockCompletionFunc *cb, void *opaque)
 {
     BlkAioEmAIOCB *acb;
@@ -1595,15 +1674,23 @@ static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset,
         .ret    = NOT_DONE,
     };
     acb->bytes = bytes;
+    acb->op = op;
     acb->has_returned = false;
+    blk_aio_boot_mark(acb, "enter");
 
     co = qemu_coroutine_create(co_entry, acb);
+    blk_aio_boot_mark(acb, "co-created");
     aio_co_enter(qemu_get_current_aio_context(), co);
+    blk_aio_boot_mark(acb, "after-co");
 
     acb->has_returned = true;
+    blk_aio_boot_mark(acb, "returned");
     if (acb->rwco.ret != NOT_DONE) {
+        blk_aio_boot_mark(acb, "schedule-complete-bh");
         replay_bh_schedule_oneshot_event(qemu_get_current_aio_context(),
                                          blk_aio_complete_bh, acb);
+    } else {
+        blk_aio_boot_mark(acb, "pending");
     }
 
     return &acb->common;
@@ -1616,8 +1703,10 @@ static void coroutine_fn blk_aio_read_entry(void *opaque)
     QEMUIOVector *qiov = rwco->iobuf;
 
     assert(qiov->size == acb->bytes);
+    blk_aio_boot_mark(acb, "read-entry-start");
     rwco->ret = blk_co_do_preadv_part(rwco->blk, rwco->offset, acb->bytes, qiov,
                                       0, rwco->flags);
+    blk_aio_boot_mark(acb, "read-entry-done");
     blk_aio_complete(acb);
 }
 
@@ -1639,7 +1728,8 @@ BlockAIOCB *blk_aio_pwrite_zeroes(BlockBackend *blk, int64_t offset,
 {
     IO_CODE();
     return blk_aio_prwv(blk, offset, bytes, NULL, blk_aio_write_entry,
-                        flags | BDRV_REQ_ZERO_WRITE, cb, opaque);
+                        flags | BDRV_REQ_ZERO_WRITE, "write-zeroes", cb,
+                        opaque);
 }
 
 int64_t coroutine_fn blk_co_getlength(BlockBackend *blk)
@@ -1710,7 +1800,7 @@ BlockAIOCB *blk_aio_preadv(BlockBackend *blk, int64_t offset,
     IO_CODE();
     assert((uint64_t)qiov->size <= INT64_MAX);
     return blk_aio_prwv(blk, offset, qiov->size, qiov,
-                        blk_aio_read_entry, flags, cb, opaque);
+                        blk_aio_read_entry, flags, "read", cb, opaque);
 }
 
 BlockAIOCB *blk_aio_pwritev(BlockBackend *blk, int64_t offset,
@@ -1720,7 +1810,7 @@ BlockAIOCB *blk_aio_pwritev(BlockBackend *blk, int64_t offset,
     IO_CODE();
     assert((uint64_t)qiov->size <= INT64_MAX);
     return blk_aio_prwv(blk, offset, qiov->size, qiov,
-                        blk_aio_write_entry, flags, cb, opaque);
+                        blk_aio_write_entry, flags, "write", cb, opaque);
 }
 
 void blk_aio_cancel(BlockAIOCB *acb)
@@ -1778,7 +1868,8 @@ BlockAIOCB *blk_aio_ioctl(BlockBackend *blk, unsigned long int req, void *buf,
                           BlockCompletionFunc *cb, void *opaque)
 {
     IO_CODE();
-    return blk_aio_prwv(blk, req, 0, buf, blk_aio_ioctl_entry, 0, cb, opaque);
+    return blk_aio_prwv(blk, req, 0, buf, blk_aio_ioctl_entry, 0, "ioctl", cb,
+                        opaque);
 }
 
 /* To be called between exactly one pair of blk_inc/dec_in_flight() */
@@ -1814,7 +1905,7 @@ BlockAIOCB *blk_aio_pdiscard(BlockBackend *blk,
 {
     IO_CODE();
     return blk_aio_prwv(blk, offset, bytes, NULL, blk_aio_pdiscard_entry, 0,
-                        cb, opaque);
+                        "discard", cb, opaque);
 }
 
 int coroutine_fn blk_co_pdiscard(BlockBackend *blk, int64_t offset,
@@ -1857,7 +1948,8 @@ BlockAIOCB *blk_aio_flush(BlockBackend *blk,
                           BlockCompletionFunc *cb, void *opaque)
 {
     IO_CODE();
-    return blk_aio_prwv(blk, 0, 0, NULL, blk_aio_flush_entry, 0, cb, opaque);
+    return blk_aio_prwv(blk, 0, 0, NULL, blk_aio_flush_entry, 0, "flush", cb,
+                        opaque);
 }
 
 int coroutine_fn blk_co_flush(BlockBackend *blk)

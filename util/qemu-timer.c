@@ -593,6 +593,117 @@ bool qemu_clock_run_timers(QEMUClockType type)
     return timerlist_run_timers(main_loop_tlg.tl[type]);
 }
 
+static bool timerlist_run_timers_with_attrs(QEMUTimerList *timer_list,
+                                            int attr_mask,
+                                            int required_attrs,
+                                            int max_timers)
+{
+    QEMUTimer *ts;
+    QEMUTimer **pt;
+    int64_t current_time;
+    bool progress = false;
+    QEMUTimerCB *cb;
+    void *opaque;
+
+    if (!qatomic_read(&timer_list->active_timers)) {
+        return false;
+    }
+    if (max_timers == 0) {
+        return false;
+    }
+
+    qemu_event_reset(&timer_list->timers_done_ev);
+    if (!timer_list->clock->enabled) {
+        goto out;
+    }
+
+    switch (timer_list->clock->type) {
+    case QEMU_CLOCK_REALTIME:
+        break;
+    default:
+    case QEMU_CLOCK_VIRTUAL:
+        break;
+    case QEMU_CLOCK_HOST:
+        if (!replay_checkpoint(CHECKPOINT_CLOCK_HOST)) {
+            goto out;
+        }
+        break;
+    case QEMU_CLOCK_VIRTUAL_RT:
+        if (!replay_checkpoint(CHECKPOINT_CLOCK_VIRTUAL_RT)) {
+            goto out;
+        }
+        break;
+    }
+
+    current_time = qemu_clock_get_ns(timer_list->clock->type);
+    qemu_mutex_lock(&timer_list->active_timers_lock);
+restart:
+    pt = &timer_list->active_timers;
+    while ((ts = *pt)) {
+        if (!timer_expired_ns(ts, current_time)) {
+            break;
+        }
+
+        if ((ts->attributes & attr_mask) != required_attrs) {
+            pt = &ts->next;
+            continue;
+        }
+
+        if (replay_mode != REPLAY_MODE_NONE
+            && timer_list->clock->type == QEMU_CLOCK_VIRTUAL
+            && !(ts->attributes & QEMU_TIMER_ATTR_EXTERNAL)
+            && !replay_checkpoint(CHECKPOINT_CLOCK_VIRTUAL)) {
+            qemu_mutex_unlock(&timer_list->active_timers_lock);
+            goto out;
+        }
+
+        *pt = ts->next;
+        ts->next = NULL;
+        ts->expire_time = -1;
+        cb = ts->cb;
+        opaque = ts->opaque;
+
+        qemu_mutex_unlock(&timer_list->active_timers_lock);
+        cb(opaque);
+        qemu_mutex_lock(&timer_list->active_timers_lock);
+
+        progress = true;
+        if (max_timers > 0) {
+            max_timers--;
+            if (max_timers == 0) {
+                break;
+            }
+        }
+        goto restart;
+    }
+    qemu_mutex_unlock(&timer_list->active_timers_lock);
+
+out:
+    qemu_event_set(&timer_list->timers_done_ev);
+    return progress;
+}
+
+bool qemu_clock_run_timers_with_attrs(QEMUClockType type,
+                                      int attr_mask,
+                                      int required_attrs)
+{
+    return timerlist_run_timers_with_attrs(main_loop_tlg.tl[type],
+                                           attr_mask,
+                                           required_attrs,
+                                           -1);
+}
+
+bool qemu_clock_run_timers_with_attrs_limit(QEMUClockType type,
+                                            int attr_mask,
+                                            int required_attrs,
+                                            int max_timers)
+{
+    return timerlist_run_timers_with_attrs(main_loop_tlg.tl[type],
+                                           attr_mask,
+                                           required_attrs,
+                                           max_timers);
+}
+
 void timerlistgroup_init(QEMUTimerListGroup *tlg,
                          QEMUTimerListNotifyCB *cb, void *opaque)
 {

@@ -20,6 +20,7 @@ system_ss.add(files(
 xemu_ss = ss.source_set()
 if get_option('xemu_browser_boot')
   xemu_ss.add(files(
+    'xemu-browser-display.c',
     'xemu-headless.c',
     'xemu-input-stubs.c',
     'xemu-net-stubs.c',

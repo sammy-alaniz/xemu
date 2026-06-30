@@ -133,7 +133,7 @@ fi
 if ! grep -q 'id="displayCanvas"' "${index_body}" ||
    ! grep -q 'xemuBrowserDisplayCapture' "${main_body}" ||
    ! grep -q 'BROWSER_DISPLAY_CAPTURE' "${main_body}" ||
-   ! grep -q 'source=synthetic-framebuffer' "${main_body}"; then
+   ! grep -q 'synthetic-framebuffer' "${main_body}"; then
     printf 'BROWSER_HOST_CHECK result=fail reason=missing-display-capture\n' >&2
     exit 1
 fi

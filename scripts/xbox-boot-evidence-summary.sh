@@ -16,7 +16,7 @@ Defaults:
 
 Controls:
   XEMU_EVIDENCE_REQUIRE_REAL_B3  Exit nonzero if real B3 is missing when set to 1.
-  XEMU_EVIDENCE_REQUIRE_COMPLETE Exit nonzero unless real B3, B4, and B5 pass.
+  XEMU_EVIDENCE_REQUIRE_COMPLETE Exit nonzero unless real B3, B4, B5, and B6 pass.
 EOF
 }
 
@@ -228,6 +228,72 @@ else
 fi
 emit_status b5_real_browser "${real_b5_status}" "log=${real_log}"
 
+b6_dashboard_log=""
+for candidate in \
+    "${real_dir}/browser-runtime-firefox-bidi-section-map-v2-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-section-map-v2.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-section-map-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-section-map-v1.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-timeout-300s-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-timeout-300s-v1.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-post-iret-v5.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pit-after-idle-full-pump-v1.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pm-ac97-callback-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-irq-source-v6-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-irq-source-v4-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-irq-watch-route-v3-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pic-ack-serviceable-lowpic-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-timer-pump-serviceable-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-timer-pump-idle-loop-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-iret-frame-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-hard-irq-service-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-tcg-timer-pump-pcrtc-off-v2-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pcrtc-vblank-off-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pcrtc-vblank-suppress-entry-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pmc-cpu-context-v1-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-after-idle-v2-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-after-idle-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-command-window-v2-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-command-window-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pgraph-notify-clear-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-alias-compare-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-post-entry-diag-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-browser-irq-pmc-limits-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pgraph-notify-probe-90s-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pgraph-notify-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pgraph-irq-line-low-priority-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-pgraph-irq-line-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-wait-state-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-pgraph-method-probe-v3-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-pgraph-method-probe-v2-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-pfifo-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-dispatch-probe-v3-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-entry-target-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-entry-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-branch-target-classification-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-exec-edge-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-exec-transition-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-exec-ret-target-probe-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-exec-probe-cpu-context-combined.log" \
+    "${real_dir}/browser-runtime-firefox-bidi-xbe-read-progress-loaded-combined.log" \
+    "${real_log}"; do
+    if [ -f "${candidate}" ]; then
+        b6_dashboard_log="${candidate}"
+        break
+    fi
+done
+if [ -n "${b6_dashboard_log}" ] &&
+   "${repo_root}/scripts/xbox-dashboard-loaded-evidence-check.sh" "${b6_dashboard_log}" >/dev/null 2>&1; then
+    real_b6_status="pass"
+elif [ -n "${b6_dashboard_log}" ]; then
+    real_b6_status="fail"
+else
+    real_b6_status="missing"
+    b6_dashboard_log="${real_dir}/browser-runtime-firefox-bidi-section-map-v2-combined.log"
+fi
+emit_status b6_dashboard_loaded "${real_b6_status}" "log=${b6_dashboard_log}"
+
 final_result="incomplete"
 if [ "${real_b3_status}" != "pass" ]; then
     next_step="real-b3-assets"
@@ -235,14 +301,16 @@ elif [ "${real_b4_status}" != "pass" ]; then
     next_step="b4-visible-display"
 elif [ "${real_b5_status}" != "pass" ]; then
     next_step="b5-real-browser"
+elif [ "${real_b6_status}" != "pass" ]; then
+    next_step="b6-dashboard-loaded"
 else
     final_result="complete"
     next_step="done"
 fi
 
-printf 'BOOT_EVIDENCE_SUMMARY result=%s synthetic_native=B%s synthetic_wasm=B%s real_b3=%s real_b4=%s real_b5=%s next=%s synthetic_dir=%s real_dir=%s\n' \
+printf 'BOOT_EVIDENCE_SUMMARY result=%s synthetic_native=B%s synthetic_wasm=B%s real_b3=%s real_b4=%s real_b5=%s real_b6=%s next=%s synthetic_dir=%s real_dir=%s\n' \
     "${final_result}" "${native_highest}" "${wasm_highest}" \
-    "${real_b3_status}" "${real_b4_status}" "${real_b5_status}" \
+    "${real_b3_status}" "${real_b4_status}" "${real_b5_status}" "${real_b6_status}" \
     "${next_step}" "${synthetic_dir}" "${real_dir}"
 
 if [ "${XEMU_EVIDENCE_REQUIRE_REAL_B3:-0}" = "1" ] && [ "${real_b3_status}" != "pass" ]; then

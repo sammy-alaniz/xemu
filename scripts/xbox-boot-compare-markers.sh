@@ -13,6 +13,13 @@ sets or exact marker order through the requested B-level.
 Optional controls:
   XEMU_COMPARE_MIN_LEVEL   Required and compared B-level scope. Default: B0.
   XEMU_COMPARE_STRICT_ORDER Compare marker order exactly when set to 1.
+  XEMU_COMPARE_STORAGE_B3_EQUIV
+                            Treat native IDE HDD reads and browser-block reads
+                            as the same B3 storage-read marker when set to 1.
+                            In this mode, volatile deep B3 diagnostics such as
+                            IDE DMA, block AIO, and browser block byte offsets
+                            are ignored after the canonical storage marker is
+                            emitted.
 EOF
 }
 
@@ -36,6 +43,7 @@ level_value() {
         B3|b3) echo 3 ;;
         B4|b4) echo 4 ;;
         B5|b5) echo 5 ;;
+        B6|b6) echo 6 ;;
         *)
             echo "Unknown boot level '$1'" >&2
             exit 2
@@ -57,6 +65,29 @@ extract_markers() {
     sed -n 's/^BOOT_MARK //p' "$1"
 }
 
+normalize_marker() {
+    local marker="$1"
+
+    if [ "${XEMU_COMPARE_STORAGE_B3_EQUIV:-0}" = "1" ]; then
+        case "${marker}" in
+            'b3 ide=hdd '*|'b3 browser_block=read '*)
+                printf 'b3 storage=hdd read\n'
+                return
+                ;;
+            'b3 ide_dma='*|\
+            'b3 dma_blk='*|\
+            'b3 blk_aio='*|\
+            'b3 bmdma='*|\
+            'b3 browser_block=open '*|\
+            'b3 browser_block=write '*)
+                return
+                ;;
+        esac
+    fi
+
+    printf '%s\n' "${marker}"
+}
+
 extract_markers_through_level() {
     local log="$1"
     local max_value="$2"
@@ -68,7 +99,7 @@ extract_markers_through_level() {
         level="${line%% *}"
         value="$(level_value "${level}")"
         if [ "${value}" -le "${max_value}" ]; then
-            printf '%s\n' "${line}"
+            normalize_marker "${line}"
         fi
     done < <(extract_markers "${log}")
 }
@@ -132,8 +163,8 @@ if [ "${XEMU_COMPARE_STRICT_ORDER:-0}" = "1" ]; then
     cp "${baseline_markers}" "${baseline_compare}"
     cp "${candidate_markers}" "${candidate_compare}"
 else
-    LC_ALL=C sort "${baseline_markers}" >"${baseline_compare}"
-    LC_ALL=C sort "${candidate_markers}" >"${candidate_compare}"
+    LC_ALL=C sort -u "${baseline_markers}" >"${baseline_compare}"
+    LC_ALL=C sort -u "${candidate_markers}" >"${candidate_compare}"
 fi
 
 if ! diff -u "${baseline_compare}" "${candidate_compare}" >"${diff_log}"; then

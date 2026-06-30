@@ -48,6 +48,14 @@
 #include "tb-internal.h"
 #include "internal-common.h"
 
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+#include "xemu-xbe.h"
+#endif
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+#include "qemu/timer.h"
+#endif
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -905,12 +913,93 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
     return false;
 }
 
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+static void xemu_boot_trace_tcg_timer_pump(void)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static uint64_t observed_tbs;
+    int64_t interval_tbs;
+    int64_t virtual_now_before;
+    int64_t virtual_deadline_before;
+    int64_t virtual_now_after;
+    int64_t virtual_deadline_after;
+    bool virtual_has_timers_before;
+    bool virtual_expired_before;
+    bool virtual_has_timers_after;
+    bool virtual_expired_after;
+    bool progress;
+
+    interval_tbs = xemu_xbe_boot_trace_tcg_timer_pump_interval();
+    if (interval_tbs <= 0) {
+        return;
+    }
+
+    observed_tbs++;
+    if (observed_tbs % (uint64_t)interval_tbs != 0 ||
+        !xemu_xbe_boot_trace_tcg_timer_pump_ready()) {
+        return;
+    }
+
+    bql_lock();
+    virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline_before =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    virtual_has_timers_before = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+    xemu_xbe_boot_trace_enter_tcg_timer_pump(
+        observed_tbs, interval_tbs, virtual_now_before,
+        virtual_deadline_before, virtual_has_timers_before,
+        virtual_expired_before);
+    if (xemu_xbe_boot_trace_tcg_timer_pump_pit_only()) {
+        progress = qemu_clock_run_timers_with_attrs_limit(
+            QEMU_CLOCK_VIRTUAL,
+            QEMU_TIMER_ATTR_XEMU_TCG_PUMP,
+            QEMU_TIMER_ATTR_XEMU_TCG_PUMP,
+            1);
+    } else {
+        progress = qemu_clock_run_all_timers();
+    }
+    xemu_xbe_boot_trace_leave_tcg_timer_pump();
+    virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline_after =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    virtual_has_timers_after = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired_after = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+    bql_unlock();
+
+    xemu_xbe_boot_trace_observe_tcg_timer_pump(
+        observed_tbs, interval_tbs,
+        virtual_now_before, virtual_deadline_before,
+        virtual_has_timers_before, virtual_expired_before, progress,
+        virtual_now_after, virtual_deadline_after,
+        virtual_has_timers_after, virtual_expired_after);
+#endif
+}
+#endif
+
 static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    uint32_t tb_size = tb->size;
+    bool xemu_tcg_timer_pump_before_tb =
+        xemu_xbe_boot_trace_tcg_timer_pump_before_tb();
+
+    xemu_xbe_boot_trace_observe_exec(pc, tb_size, "tcg-tb");
+    if (xemu_tcg_timer_pump_before_tb) {
+        xemu_boot_trace_tcg_timer_pump();
+    }
+#endif
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_boot_trace_observe_exec_transition(pc, tb_size, *tb_exit,
+                                                "tcg-tb-post");
+    if (!xemu_tcg_timer_pump_before_tb) {
+        xemu_boot_trace_tcg_timer_pump();
+    }
+#endif
     if (*tb_exit != TB_EXIT_REQUESTED) {
         *last_tb = tb;
         return;

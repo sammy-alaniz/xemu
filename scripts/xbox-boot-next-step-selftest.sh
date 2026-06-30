@@ -88,6 +88,29 @@ BROWSER_DISPLAY_CAPTURE result=pass nonempty=yes hash=0123456789abcdef0123456789
 EOF
 }
 
+write_promoted_native_b6_baseline() {
+    local root="$1"
+
+    mkdir -p "${root}/real/native-headless-graphic-update-v2"
+    cat >"${root}/real/native-headless-graphic-update-v2/boot-smoke.log" <<'EOF'
+BOOT_MARK b6 dashboard=xbe-executed context=native-headless guest_pc=0x00010100 image_base=0x00010000 image_size=4096 phys_match=yes section_index=0 section_flags=0x00000006 source=tcg-tb-post
+NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless source=native-framebuffer hash=fedcba9876543210 width=640 height=480 dashboard=xbe-executed frame=1 build_id=synthetic
+EOF
+}
+
+write_real_b6() {
+    local root="$1"
+
+    cat >"${root}/real/browser-runtime-firefox-bidi-browser-irq-pmc-limits-combined.log" <<'EOF'
+BOOT_MARK b6 dashboard=xbe-read context=browser-runtime file=xboxdash.xbe path=xboxdash.xbe partition_lba=0 start_lba=1 sectors=1 file_size=512 first_cluster=2 cluster=2 read_index=1 read_lba=1 read_nsectors=1 overlap_lba=1 overlap_sectors=1 method=dma source=ide-read-log
+BOOT_MARK b6 dashboard=xbe-loaded context=browser-runtime guest_addr=0x00010000 image_size=4096 headers_size=512 entry=0x00010100 title_id=0xffff0002 source=virtual-header phys_addr=0x000e0000
+BOOT_MARK b6 dashboard=xbe-entry-probe context=browser-runtime status=ready guest_entry=0x00010100 image_pc=0x00010100 entry_offset=0x00000100 image_base=0x00010000 image_size=4096 relation=overlap distance=0 address_mode=direct entry_phys_mapped=yes entry_phys=0x00020100 image_phys_mapped=yes image_phys=0x00020100 phys_match=yes entry_code_read=yes entry_code_hash=0x0123456789abcdef entry_opcode=0x55 source=virtual-header
+BOOT_MARK b6 dashboard=xbe-executed context=browser-runtime guest_pc=0x00010100 image_base=0x00010000 image_size=4096 phys_match=yes section_index=0 section_flags=0x00000006 section_virtual_addr=0x00010000 section_virtual_end=0x00011000 source=tcg-tb
+NATIVE_DASHBOARD_REFERENCE result=pass context=native-headless source=native-framebuffer hash=fedcba9876543210 width=640 height=480 dashboard=xbe-executed frame=1 build_id=synthetic
+BROWSER_DASHBOARD_CAPTURE result=pass native_ref_match=yes hash=0123456789abcdef native_hash=fedcba9876543210 source=browser-framebuffer width=640 height=480
+EOF
+}
+
 run_case() {
     local name="$1"
     local pattern="$2"
@@ -188,11 +211,24 @@ BOOT_REAL_B3_MATRIX_RESULT result=fail reason=fixtures log=/tmp/real/real-fixtur
 EOF
 }
 
-case_complete() {
+case_b6_next() {
     write_synthetic_pass "$1"
     write_real_ready "$1"
     write_real_b3 "$1"
     write_real_b4 "$1"
+    write_promoted_native_b6_baseline "$1"
+}
+
+case_b6_next_preferred_boundary() {
+    case_b6_next "$1"
+    cat >"${1}/real/browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log" <<'EOF'
+BOOT_MARK b6 dashboard=xbe-read context=browser-runtime file=xboxdash.xbe
+EOF
+}
+
+case_complete() {
+    case_b6_next "$1"
+    write_real_b6 "$1"
 }
 
 run_case synthetic-missing 'reason=synthetic-gate command_id=synthetic-gate command_json="scripts/xbox-browser-boot-verify-synthetic.sh"' case_synthetic_missing
@@ -203,6 +239,8 @@ run_case ready-real-b3-from-real-dir 'reason=real-b3-preflight-and-matrix comman
 run_case real-preflight-fixtures-failed 'reason=fix-real-fixtures command_id=real-fixtures-ready command_json="scripts/xbox-real-fixtures-ready.sh"' case_real_preflight_fixtures_failed
 run_case real-b3-failed 'reason=real-b3-evidence-failed command_id=real-b3-evidence command_json="scripts/xbox-real-b3-evidence-check.sh build-real-b3-matrix/real-b3-matrix.log"' case_real_b3_failed
 run_case b4-next 'next=b4-visible-display .*command_id=b4-display-evidence command_json="scripts/xbox-display-capture-evidence-check.sh build-real-b3-matrix/real-b3-matrix.log"' case_b4_next
+run_case b6-next 'next=b6-dashboard-loaded .*command_id=b6-dashboard-loaded-evidence command_json="scripts/xbox-dashboard-loaded-evidence-check.sh .*real-b3-matrix.log".*diagnostic_command_id=b6-current-boundary.*diagnostic_reason=converge-browser-post-service-flow.*diagnostic_command_json="scripts/xbox-b6-current-boundary.sh --native-log .*native-headless-graphic-update-v2/boot-smoke.log --browser-log .*real-b3-matrix.log"' case_b6_next
+run_case b6-next-preferred-boundary 'next=b6-dashboard-loaded .*command_id=b6-dashboard-loaded-evidence command_json="scripts/xbox-dashboard-loaded-evidence-check.sh .*browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log".*diagnostic_command_id=b6-current-boundary.*diagnostic_reason=converge-browser-post-service-flow.*diagnostic_command_json="scripts/xbox-b6-current-boundary.sh --native-log .*native-headless-graphic-update-v2/boot-smoke.log --browser-log .*browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log"' case_b6_next_preferred_boundary
 run_case complete 'XBOX_BOOT_NEXT result=done next=done reason=complete command_id=audit-complete' case_complete
 
-printf 'XBOX_BOOT_NEXT_SELFTEST_RESULT result=pass cases=9\n'
+printf 'XBOX_BOOT_NEXT_SELFTEST_RESULT result=pass cases=11\n'

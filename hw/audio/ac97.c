@@ -29,6 +29,7 @@
 #include "qemu/error-report.h"
 #include "ac97_int.h"
 #include "ac97.h"
+#include "xemu-xbe.h"
 
 #define SOFT_VOLUME
 #define SR_FIFOE 16             /* rwc */
@@ -146,6 +147,19 @@ typedef struct AC97DeviceState {
     MemoryRegion io_nabm;
 } AC97DeviceState;
 
+typedef struct AC97BMTraceSnapshot {
+    uint32_t bdbar;
+    uint8_t civ;
+    uint8_t lvi;
+    uint8_t piv;
+    uint16_t sr;
+    uint8_t cr;
+    uint16_t picb;
+    uint32_t bd_addr;
+    uint32_t bd_ctl_len;
+    bool bd_valid;
+} AC97BMTraceSnapshot;
+
 #define AC97_DEVICE(obj) \
     OBJECT_CHECK(AC97DeviceState, (obj), "AC97")
 
@@ -155,6 +169,22 @@ static void po_callback(void *opaque, int free);
 static void pi_callback(void *opaque, int avail);
 static void mc_callback(void *opaque, int avail);
 #endif
+
+static AC97BMTraceSnapshot trace_bm_snapshot(AC97BusMasterRegs *r)
+{
+    return (AC97BMTraceSnapshot) {
+        .bdbar = r->bdbar,
+        .civ = r->civ,
+        .lvi = r->lvi,
+        .piv = r->piv,
+        .sr = r->sr,
+        .cr = r->cr,
+        .picb = r->picb,
+        .bd_addr = r->bd.addr,
+        .bd_ctl_len = r->bd.ctl_len,
+        .bd_valid = r->bd_valid != 0,
+    };
+}
 
 static void fetch_bd(AC97LinkState *s, AC97BusMasterRegs *r)
 {
@@ -177,8 +207,10 @@ static void update_sr(AC97LinkState *s, AC97BusMasterRegs *r, uint32_t new_sr)
 {
     int event = 0;
     int level = 0;
+    uint32_t sr_before = r->sr;
+    uint32_t glob_sta_before = s->glob_sta;
     uint32_t new_mask = new_sr & SR_INT_MASK;
-    uint32_t old_mask = r->sr & SR_INT_MASK;
+    uint32_t old_mask = sr_before & SR_INT_MASK;
     uint32_t masks[] = {GS_PIINT, GS_POINT, GS_MINT};
 
     if (new_mask ^ old_mask) {
@@ -216,6 +248,25 @@ static void update_sr(AC97LinkState *s, AC97BusMasterRegs *r, uint32_t new_sr)
         dolog("set irq level=0");
         pci_irq_deassert(s->pci_dev);
     }
+
+    xemu_xbe_boot_trace_observe_ac97_irq_update(
+        r - s->bm_regs, sr_before, r->sr, r->cr, glob_sta_before,
+        s->glob_sta, old_mask, new_mask, event, level, r->civ, r->lvi,
+        r->piv, r->picb, r->bdbar, r->bd.addr, r->bd.ctl_len,
+        r->bd_valid != 0);
+}
+
+static void trace_bm_write(AC97LinkState *s, AC97BusMasterRegs *r,
+                           const char *reg, uint32_t addr, uint32_t val,
+                           unsigned width,
+                           const AC97BMTraceSnapshot *before)
+{
+    xemu_xbe_boot_trace_observe_ac97_bm_write(
+        reg, r - s->bm_regs, addr, val, width, before->bdbar, r->bdbar,
+        before->civ, r->civ, before->lvi, r->lvi, before->piv, r->piv,
+        before->sr, r->sr, before->cr, r->cr, before->picb, r->picb,
+        before->bd_addr, r->bd.addr, before->bd_ctl_len, r->bd.ctl_len,
+        before->bd_valid, r->bd_valid != 0);
 }
 
 static void voice_set_active(AC97LinkState *s, int bm_index, int on)
@@ -806,8 +857,10 @@ static void nabm_writeb(void *opaque, uint32_t addr, uint32_t val)
     case PI_LVI:
     case PO_LVI:
     case MC_LVI:
-    case SO_LVI:
+    case SO_LVI: {
+        AC97BMTraceSnapshot before;
         r = &s->bm_regs[GET_BM(addr)];
+        before = trace_bm_snapshot(r);
         if ((r->cr & CR_RPBM) && (r->sr & SR_DCH)) {
             r->sr &= ~(SR_DCH | SR_CELV);
             r->civ = r->piv;
@@ -815,13 +868,17 @@ static void nabm_writeb(void *opaque, uint32_t addr, uint32_t val)
             fetch_bd(s, r);
         }
         r->lvi = val % 32;
+        trace_bm_write(s, r, "lvi", addr, val, 1, &before);
         dolog("LVI[%d] <- 0x%x", GET_BM(addr), val);
         break;
+    }
     case PI_CR:
     case PO_CR:
     case MC_CR:
-    case SO_CR:
+    case SO_CR: {
+        AC97BMTraceSnapshot before;
         r = &s->bm_regs[GET_BM(addr)];
+        before = trace_bm_snapshot(r);
         if (val & CR_RR) {
             reset_bm_regs(s, r);
         } else {
@@ -837,17 +894,23 @@ static void nabm_writeb(void *opaque, uint32_t addr, uint32_t val)
                 voice_set_active(s, r - s->bm_regs, 1);
             }
         }
+        trace_bm_write(s, r, "cr", addr, val, 1, &before);
         dolog("CR[%d] <- 0x%x (cr 0x%x)", GET_BM(addr), val, r->cr);
         break;
+    }
     case PI_SR:
     case PO_SR:
     case MC_SR:
-    case SO_SR:
+    case SO_SR: {
+        AC97BMTraceSnapshot before;
         r = &s->bm_regs[GET_BM(addr)];
+        before = trace_bm_snapshot(r);
         r->sr |= val & ~(SR_RO_MASK | SR_WCLEAR_MASK);
         update_sr(s, r, r->sr & ~(val & SR_WCLEAR_MASK));
+        trace_bm_write(s, r, "sr", addr, val, 1, &before);
         dolog("SR[%d] <- 0x%x (sr 0x%x)", GET_BM(addr), val, r->sr);
         break;
+    }
     default:
         dolog("U nabm writeb 0x%x <- 0x%x", addr, val);
         break;
@@ -863,12 +926,16 @@ static void nabm_writew(void *opaque, uint32_t addr, uint32_t val)
     case PI_SR:
     case PO_SR:
     case MC_SR:
-    case SO_SR:
+    case SO_SR: {
+        AC97BMTraceSnapshot before;
         r = &s->bm_regs[GET_BM(addr)];
+        before = trace_bm_snapshot(r);
         r->sr |= val & ~(SR_RO_MASK | SR_WCLEAR_MASK);
         update_sr(s, r, r->sr & ~(val & SR_WCLEAR_MASK));
+        trace_bm_write(s, r, "sr", addr, val, 2, &before);
         dolog("SR[%d] <- 0x%x (sr 0x%x)", GET_BM(addr), val, r->sr);
         break;
+    }
     default:
         dolog("U nabm writew 0x%x <- 0x%x", addr, val);
         nabm_writeb(opaque, addr, val & 0xff);
@@ -886,11 +953,15 @@ static void nabm_writel(void *opaque, uint32_t addr, uint32_t val)
     case PI_BDBAR:
     case PO_BDBAR:
     case MC_BDBAR:
-    case SO_BDBAR:
+    case SO_BDBAR: {
+        AC97BMTraceSnapshot before;
         r = &s->bm_regs[GET_BM(addr)];
+        before = trace_bm_snapshot(r);
         r->bdbar = val & ~3;
+        trace_bm_write(s, r, "bdbar", addr, val, 4, &before);
         dolog("BDBAR[%d] <- 0x%x (bdbar 0x%x)", GET_BM(addr), val, r->bdbar);
         break;
+    }
     case GLOB_CNT:
         /* TODO: Handle WR or CR being set (warm/cold reset requests) */
         if (!(val & (GC_WR | GC_CR))) {
@@ -1102,6 +1173,10 @@ static void transfer_audio(AC97LinkState *s, int index, int elapsed)
                 fetch_bd(s, r);
             }
 
+            xemu_xbe_boot_trace_observe_ac97_transfer(
+                index, "descriptor-complete", elapsed, temp, stop, r->sr,
+                new_sr, r->cr, r->civ, r->lvi, r->piv, r->picb, r->bdbar,
+                r->bd.addr, r->bd.ctl_len, r->bd_valid != 0);
             update_sr(s, r, new_sr);
         }
     }
@@ -1121,7 +1196,13 @@ static void mc_callback(void *opaque, int avail)
 
 static void po_callback(void *opaque, int free)
 {
-    transfer_audio(opaque, PO_INDEX, free);
+    AC97LinkState *s = opaque;
+    AC97BusMasterRegs *r = &s->bm_regs[PO_INDEX];
+
+    xemu_xbe_boot_trace_observe_ac97_callback(
+        "po", PO_INDEX, free, r->sr, r->cr, r->civ, r->lvi, r->piv,
+        r->picb, r->bdbar, r->bd.addr, r->bd.ctl_len, r->bd_valid != 0);
+    transfer_audio(s, PO_INDEX, free);
 }
 
 static const VMStateDescription vmstate_ac97_bm_regs = {

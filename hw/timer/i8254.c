@@ -30,6 +30,7 @@
 #include "hw/timer/i8254_internal.h"
 #include "qom/object.h"
 #include "trace.h"
+#include "xemu-xbe.h"
 
 //#define DEBUG_PIT
 
@@ -267,6 +268,12 @@ static void pit_irq_timer_update(PITChannelState *s, int64_t current_time)
     }
     expire_time = pit_get_next_transition_time(s, current_time);
     irq_level = pit_get_out(s, current_time);
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_boot_trace_observe_pit_irq_timer(current_time, expire_time,
+                                              irq_level, s->mode, s->gate,
+                                              s->count, s->count_load_time,
+                                              s->next_transition_time);
+#endif
     qemu_set_irq(s->irq, irq_level);
 #ifdef DEBUG_PIT
     printf("irq_level=%d next_delay=%f\n",
@@ -345,7 +352,9 @@ static void pit_realizefn(DeviceState *dev, Error **errp)
 
     s = &pit->channels[0];
     /* the timer 0 is connected to an IRQ */
-    s->irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pit_irq_timer, s);
+    s->irq_timer = timer_new_full(NULL, QEMU_CLOCK_VIRTUAL, SCALE_NS,
+                                  QEMU_TIMER_ATTR_XEMU_TCG_PUMP,
+                                  pit_irq_timer, s);
     qdev_init_gpio_out(dev, &s->irq, 1);
 
     memory_region_init_io(&pit->ioports, OBJECT(pit), &pit_ioport_ops,

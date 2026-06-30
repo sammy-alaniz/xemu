@@ -61,6 +61,17 @@
 #include "system/tpm.h"
 #include "trace.h"
 
+static bool runstate_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
 static NotifierList exit_notifiers =
     NOTIFIER_LIST_INITIALIZER(exit_notifiers);
 
@@ -690,6 +701,9 @@ void qemu_system_guest_pvshutdown(void)
 
 void qemu_system_reset_request(ShutdownCause reason)
 {
+    if (runstate_boot_trace_enabled()) {
+        error_report("BOOT_MARK b3 runstate=reset-request reason=%d", reason);
+    }
     if (reboot_action == REBOOT_ACTION_SHUTDOWN &&
         reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         shutdown_requested = reason;
@@ -793,6 +807,10 @@ void qemu_system_shutdown_request_with_code(ShutdownCause reason,
 void qemu_system_shutdown_request(ShutdownCause reason)
 {
     trace_qemu_system_shutdown_request(reason);
+    if (runstate_boot_trace_enabled()) {
+        error_report("BOOT_MARK b3 runstate=shutdown-request reason=%d",
+                     reason);
+    }
     replay_shutdown_request(reason);
     shutdown_requested = reason;
     if (reason == SHUTDOWN_CAUSE_HOST_QMP_QUIT) {
@@ -860,6 +878,10 @@ static bool main_loop_should_exit(int *status)
                 panic_action == PANIC_ACTION_EXIT_FAILURE) {
                 *status = EXIT_FAILURE;
             }
+            if (runstate_boot_trace_enabled()) {
+                error_report("BOOT_MARK b3 runstate=main-loop-shutdown"
+                             " reason=%d status=%d", request, *status);
+            }
             return true;
         }
     }
@@ -901,6 +923,10 @@ int qemu_main_loop(void)
 
     while (!main_loop_should_exit(&status)) {
         main_loop_wait(false);
+    }
+    if (runstate_boot_trace_enabled()) {
+        error_report("BOOT_MARK b3 runstate=main-loop-exit status=%d",
+                     status);
     }
     return status;
 }

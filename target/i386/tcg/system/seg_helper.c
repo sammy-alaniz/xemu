@@ -27,6 +27,10 @@
 #include "tcg/helper-tcg.h"
 #include "../seg_helper.h"
 
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+#include "xemu-xbe.h"
+#endif
+
 void helper_syscall(CPUX86State *env, int next_eip_addend)
 {
     int selector;
@@ -201,12 +205,23 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         do_interrupt_x86_hardirq(env, EXCP12_MCHK, 0);
         break;
     case CPU_INTERRUPT_HARD:
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+        if (xemu_xbe_boot_trace_defer_cpu_hard_irq_service()) {
+            return false;
+        }
+#endif
         cpu_svm_check_intercept_param(env, SVM_EXIT_INTR, 0, 0);
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_VIRQ);
         intno = cpu_get_pic_interrupt(env);
         qemu_log_mask(CPU_LOG_INT,
                       "Servicing hardware INT=0x%02x\n", intno);
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+        xemu_xbe_boot_trace_observe_cpu_hard_irq_service("before", intno);
+#endif
         do_interrupt_x86_hardirq(env, intno, 1);
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+        xemu_xbe_boot_trace_observe_cpu_hard_irq_service("after", intno);
+#endif
         break;
     case CPU_INTERRUPT_VIRQ:
         cpu_svm_check_intercept_param(env, SVM_EXIT_VINTR, 0, 0);

@@ -31,6 +31,7 @@
 #include "hw/xbox/acpi_xbox.h"
 #include "migration/vmstate.h"
 #include "ui/xemu-widescreen.h"
+#include "xemu-xbe.h"
 
 // #define DEBUG
 #ifdef DEBUG
@@ -82,9 +83,32 @@ static const MemoryRegionOps xbox_pm_gpio_ops = {
     .write = xbox_pm_gpio_write,
 };
 
+static uint8_t xbox_pm_gpe_sts0(XBOX_PMRegs *pm)
+{
+    return pm->acpi_regs.gpe.sts ? pm->acpi_regs.gpe.sts[0] : 0;
+}
+
+static uint8_t xbox_pm_gpe_en0(XBOX_PMRegs *pm)
+{
+    return pm->acpi_regs.gpe.en ? pm->acpi_regs.gpe.en[0] : 0;
+}
+
+static void xbox_pm_trace_sci_update(XBOX_PMRegs *pm,
+                                      const char *reason,
+                                      int sci_level,
+                                      uint16_t pm1a_sts,
+                                      bool timer_enabled)
+{
+    xemu_xbe_boot_trace_observe_xbox_pm_sci(
+        reason, sci_level, pm1a_sts, pm->acpi_regs.pm1.evt.en,
+        xbox_pm_gpe_sts0(pm), xbox_pm_gpe_en0(pm),
+        pm->acpi_regs.tmr.overflow_time, timer_enabled);
+}
+
 static void pm_update_sci(XBOX_PMRegs *pm)
 {
     int sci_level, pm1a_sts;
+    bool timer_enabled;
 
     pm1a_sts = acpi_pm1_evt_get_sts(&pm->acpi_regs);
 
@@ -93,12 +117,15 @@ static void pm_update_sci(XBOX_PMRegs *pm)
                    ACPI_BITMASK_POWER_BUTTON_ENABLE |
                    ACPI_BITMASK_GLOBAL_LOCK_ENABLE |
                    ACPI_BITMASK_TIMER_ENABLE)) != 0);
+    timer_enabled =
+        (pm->acpi_regs.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
+        !(pm1a_sts & ACPI_BITMASK_TIMER_STATUS);
+    xbox_pm_trace_sci_update(pm, "pm1-update", sci_level, pm1a_sts,
+                             timer_enabled);
     qemu_set_irq(pm->irq, sci_level);
 
     /* schedule a timer interruption if needed */
-    acpi_pm_tmr_update(&pm->acpi_regs,
-                       (pm->acpi_regs.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
-                       !(pm1a_sts & ACPI_BITMASK_TIMER_STATUS));
+    acpi_pm_tmr_update(&pm->acpi_regs, timer_enabled);
 }
 
 static void xbox_pm_update_sci_fn(ACPIREGS *regs)
@@ -117,7 +144,21 @@ static void xbox_pm_gpe_writeb(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
     XBOX_PMRegs *pm = opaque;
+    int sci_level;
+    uint16_t pm1a_sts;
+    bool timer_enabled;
+
     acpi_gpe_ioport_writeb(&pm->acpi_regs, addr, val);
+    pm1a_sts = acpi_pm1_evt_get_sts(&pm->acpi_regs);
+    sci_level =
+        ((pm1a_sts & pm->acpi_regs.pm1.evt.en &
+          ACPI_BITMASK_PM1_COMMON_ENABLED) != 0) ||
+        ((xbox_pm_gpe_sts0(pm) & xbox_pm_gpe_en0(pm)) != 0);
+    timer_enabled =
+        (pm->acpi_regs.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
+        !(pm1a_sts & ACPI_BITMASK_TIMER_STATUS);
+    xbox_pm_trace_sci_update(pm, "gpe-write", sci_level, pm1a_sts,
+                             timer_enabled);
     acpi_update_sci(&pm->acpi_regs, pm->irq);
 }
 

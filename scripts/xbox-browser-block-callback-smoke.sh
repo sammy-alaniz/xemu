@@ -216,6 +216,7 @@ moduleArg.xemuBrowserBlockRead = (id, offset, ptr, bytes) => {
     heap.set(block.bytes.subarray(offset, offset + bytes), ptr);
   }
   console.log(`BROWSER_BLOCK_READ result=pass id=${id} asset=${block.key} backend=${block.backend} offset=${offset} bytes=${bytes}`);
+  console.log(`BOOT_MARK b3 browser_block=read id=${id} offset=${offset} bytes=${bytes}`);
   return 0;
 };
 
@@ -260,6 +261,7 @@ globalThis.xemuBrowserBlockClose = moduleArg.xemuBrowserBlockClose;
 
 moduleArg.preRun = [() => {
   moduleArg.FS.mkdir("/xemu-fixtures");
+  moduleArg.FS.writeFile("/xemu-fixtures/boot_trace_context.txt", "browser-block-callback\n");
   moduleArg.FS.writeFile("/xemu-fixtures/flash.bin", flash);
   moduleArg.FS.writeFile("/xemu-fixtures/eeprom.bin", eeprom);
   if (mcpxPath) {
@@ -279,6 +281,7 @@ docker_args=(
     -e HOME=/tmp/xemu-home
     -e XEMU_HEADLESS_BOOT=1
     -e XEMU_BOOT_TRACE=1
+    -e XEMU_BOOT_TRACE_CONTEXT=browser-block-callback
     -e XEMU_HEADLESS_BOOT_MS="${timeout_ms}"
     -e XEMU_NODE_TIMEOUT_MS="${timeout_ms}"
     -e XEMU_BROWSER_BLOCK_HDD_MB="${hdd_mb}"

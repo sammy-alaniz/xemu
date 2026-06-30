@@ -1,8 +1,13 @@
 /GNUmakefile
 /build/
 /build-browser-probe/
+/build-browser-boot-verify-synthetic/
 /build-docker/
+/build-docker-b6-pfifo-boundary/
+/build-docker-b6-xbe-scan/
+/build-real-b3-matrix/
 /build-wasm/
+/build-wasm-pic/
 /build-wasm-sysroot/
 /fixtures/
 /xemu-fixtures/

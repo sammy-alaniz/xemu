@@ -352,7 +352,7 @@ typedef union IcountDecr {
     } u16;
 } IcountDecr;
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
 typedef void (*MemAccessCallbackFunc)(void *opaque, MemoryRegion *mr, hwaddr addr, hwaddr len, bool write);
 
 typedef struct MemAccessCallback {
@@ -1183,7 +1183,7 @@ static inline bool cpu_breakpoint_test(CPUState *cpu, vaddr pc, int mask)
     return false;
 }
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
 /**
  * Access callbacks to facilitate lazy syncronization, specifically when
  * emulating GPUs in an UMA system (e.g. Xbox).

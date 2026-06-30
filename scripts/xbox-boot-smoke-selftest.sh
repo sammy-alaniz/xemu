@@ -120,10 +120,38 @@ run_case() {
     printf 'BOOT_SMOKE_SELFTEST case=%s result=pass status=%s\n' "${name}" "${status}"
 }
 
+run_skip_boot_anim_config_case() {
+    local name="skip-boot-anim-config"
+    local out_dir="${tmp_dir}/${name}"
+    local out_path="${tmp_dir}/${name}.out"
+
+    mkdir -p "${out_dir}"
+    XEMU_FAKE_SMOKE_CASE="b2-pass" \
+    XEMU_SMOKE_BINARY="${fake_binary}" \
+    XEMU_FLASH="${flash_path}" \
+    XEMU_HDD="${hdd_path}" \
+    XEMU_SMOKE_EXPECT_LEVEL="B2" \
+    XEMU_SMOKE_OUT_DIR="${out_dir}" \
+    XEMU_SMOKE_SKIP_BOOT_ANIM=1 \
+        "${script}" native-headless >"${out_path}" 2>&1
+
+    if ! grep -q '^skip_boot_anim = true$' "${out_dir}/xemu-smoke.toml"; then
+        printf 'BOOT_SMOKE_SELFTEST case=%s result=fail reason=missing-skip-boot-anim-config\n' \
+            "${name}" >&2
+        cat "${out_dir}/xemu-smoke.toml" >&2
+        cat "${out_path}" >&2
+        exit 1
+    fi
+
+    cat "${out_path}"
+    printf 'BOOT_SMOKE_SELFTEST case=%s result=pass status=0\n' "${name}"
+}
+
 run_case b2-pass b2-pass B2 0 'BOOT_SMOKE_SUMMARY result=pass .*level=B2 .*expected=B2'
 run_case b3-missing-hdd-read b3-no-hdd-read B3 1 'reason=missing-b3-hdd-read'
 run_case b3-pass b3-pass B3 0 'BOOT_SMOKE_SUMMARY result=pass .*level=B3 .*expected=B3'
 run_case missing-result missing-result B2 1 'reason=missing-smoke-result'
 run_case below-expected below-expected B2 1 'reason=missing-expected-level'
+run_skip_boot_anim_config_case
 
-printf 'BOOT_SMOKE_SELFTEST_RESULT result=pass cases=5\n'
+printf 'BOOT_SMOKE_SELFTEST_RESULT result=pass cases=6\n'

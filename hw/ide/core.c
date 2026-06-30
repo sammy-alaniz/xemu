@@ -43,6 +43,7 @@
 #include "system/runstate.h"
 #include "ide-internal.h"
 #include "trace.h"
+#include "xemu-xbe.h"
 
 /* These values were based on a Seagate ST3500418AS but have been modified
    to make more sense in QEMU */
@@ -81,9 +82,80 @@ static const char *IDE_DMA_CMD_str(enum ide_dma_cmd enval)
 
 static bool ide_boot_trace_enabled(void)
 {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
     const char *value = getenv("XEMU_BOOT_TRACE");
 
     return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static int64_t ide_boot_trace_read_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = 512;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BOOT_TRACE_IDE_READ_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_BOOT_TRACE_IDE_READ_LIMIT='%s'; using 512\n",
+                value);
+        limit = 512;
+    }
+
+    return limit;
+}
+
+static bool ide_boot_poll_aio_after_submit_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    const char *value = getenv("XEMU_BROWSER_BOOT_POLL_AIO_AFTER_IDE_SUBMIT");
+
+    return !value || !value[0] || strcmp(value, "0");
+#else
+    return false;
+#endif
+}
+
+static int64_t ide_boot_trace_xbe_dma_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = 8;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BOOT_TRACE_XBE_DMA_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        fprintf(stderr,
+                "Invalid XEMU_BOOT_TRACE_XBE_DMA_LIMIT='%s'; using 8\n",
+                value);
+        limit = 8;
+    }
+
+    return limit;
 }
 
 static void ide_boot_mark_hdd_read_once(IDEState *s, int64_t sector_num,
@@ -100,6 +172,148 @@ static void ide_boot_mark_hdd_read_once(IDEState *s, int64_t sector_num,
             "BOOT_MARK b3 ide=hdd first_read_lba=%" PRId64
             " nsectors=%d method=%s unit=%d total_sectors=%" PRId64 "\n",
             sector_num, nsectors, method, s->unit, s->nb_sectors);
+}
+
+static void ide_boot_mark_hdd_read(IDEState *s, int64_t sector_num,
+                                   int nsectors, const char *method)
+{
+    static uint64_t read_mark_count;
+    int64_t limit;
+
+    ide_boot_mark_hdd_read_once(s, sector_num, nsectors, method);
+
+    if (!ide_boot_trace_enabled() || s->drive_kind != IDE_HD) {
+        return;
+    }
+
+    limit = ide_boot_trace_read_limit();
+    if (limit == 0 || read_mark_count >= limit) {
+        return;
+    }
+
+    read_mark_count++;
+    fprintf(stderr,
+            "BOOT_MARK b3 ide=hdd read_index=%" PRIu64
+            " read_lba=%" PRId64
+            " nsectors=%d method=%s unit=%d total_sectors=%" PRId64 "\n",
+            read_mark_count, sector_num, nsectors, method, s->unit,
+            s->nb_sectors);
+}
+
+static void ide_boot_mark_dma_event(IDEState *s, const char *event,
+                                    int ret, int64_t sector_num,
+                                    int nsectors, bool stay_active)
+{
+    static uint64_t dma_mark_count;
+    int64_t limit;
+
+    if (!ide_boot_trace_enabled() || s->drive_kind != IDE_HD) {
+        return;
+    }
+
+    limit = ide_boot_trace_read_limit();
+    if (limit == 0 || dma_mark_count >= limit) {
+        return;
+    }
+
+    dma_mark_count++;
+    fprintf(stderr,
+            "BOOT_MARK b3 ide_dma=%s index=%" PRIu64
+            " ret=%d cmd=%s unit=%d current_lba=%" PRId64
+            " nsectors=%d remaining=%u io_buffer_size=%d sg_size=%" PRIu64
+            " status=0x%02x stay_active=%s\n",
+            event, dma_mark_count, ret, IDE_DMA_CMD_str(s->dma_cmd), s->unit,
+            sector_num, nsectors, s->nsector, s->io_buffer_size,
+            (uint64_t)s->sg.size,
+            s->status, stay_active ? "yes" : "no");
+}
+
+static void ide_boot_mark_xbe_dma_buffer(IDEState *s, int64_t sector_num,
+                                         int nsectors)
+{
+    static uint64_t mark_count;
+    int64_t limit;
+    uint64_t bytes_left;
+
+    if (!ide_boot_trace_enabled() || s->drive_kind != IDE_HD) {
+        return;
+    }
+
+    limit = ide_boot_trace_xbe_dma_limit();
+    if (limit == 0 || mark_count >= limit) {
+        return;
+    }
+
+    bytes_left = (uint64_t)nsectors * BDRV_SECTOR_SIZE;
+    for (int i = 0; i < s->sg.nsg && bytes_left > 0; i++) {
+        dma_addr_t base = s->sg.sg[i].base;
+        uint64_t len = MIN((uint64_t)s->sg.sg[i].len, bytes_left);
+
+        for (uint64_t offset = 0;
+             offset + sizeof(struct xbe_header) <= len;
+             offset += 16) {
+            uint32_t sig;
+            uint32_t headers_size;
+            uint32_t image_size;
+            uint32_t image_base;
+            uint32_t entry;
+            MemTxResult result;
+            uint8_t header_probe[sizeof(struct xbe_header)];
+
+            result = dma_memory_read(s->sg.as, base + offset, header_probe,
+                                     sizeof(header_probe),
+                                     MEMTXATTRS_UNSPECIFIED);
+            if (result != MEMTX_OK || ldl_le_p(header_probe) != 0x48454258) {
+                continue;
+            }
+
+            sig = ldl_le_p(header_probe);
+            image_base = ldl_le_p(header_probe +
+                                  offsetof(struct xbe_header, m_base));
+            headers_size = ldl_le_p(header_probe +
+                                    offsetof(struct xbe_header,
+                                             m_sizeof_headers));
+            image_size = ldl_le_p(header_probe +
+                                  offsetof(struct xbe_header, m_sizeof_image));
+            entry = ldl_le_p(header_probe +
+                             offsetof(struct xbe_header, m_entry));
+            mark_count++;
+            fprintf(stderr,
+                    "BOOT_MARK b6 dashboard=xbe-dma-buffer"
+                    " read_lba=%" PRId64
+                    " nsectors=%d"
+                    " sg_index=%d"
+                    " sg_addr=0x%08" PRIx64
+                    " sg_offset=%" PRIu64
+                    " xbe_magic=0x%08" PRIx32
+                    " image_base=0x%08" PRIx32
+                    " image_size=%" PRIu32
+                    " headers_size=%" PRIu32
+                    " entry=0x%08" PRIx32
+                    " source=ide-dma-buffer\n",
+                    sector_num, nsectors, i, (uint64_t)base, offset, sig,
+                    image_base, image_size, headers_size, entry);
+            xemu_xbe_boot_trace_observe_dma_header((uint64_t)base + offset,
+                                                   sector_num, nsectors,
+                                                   image_base, image_size,
+                                                   headers_size, entry);
+            return;
+        }
+
+        bytes_left -= len;
+    }
+}
+
+static void ide_boot_poll_aio_after_submit(IDEState *s, int ret,
+                                           int64_t sector_num, int nsectors)
+{
+    if (!ide_boot_poll_aio_after_submit_enabled()) {
+        return;
+    }
+
+    ide_boot_mark_dma_event(s, "poll-aio-after-submit", ret, sector_num,
+                            nsectors, false);
+    aio_poll(qemu_get_current_aio_context(), false);
 }
 
 static void ide_dummy_transfer_stop(IDEState *s);
@@ -843,7 +1057,7 @@ static void ide_sector_read(IDEState *s)
     }
 
     trace_ide_sector_read(sector_num, n);
-    ide_boot_mark_hdd_read_once(s, sector_num, n, "pio");
+    ide_boot_mark_hdd_read(s, sector_num, n, "pio");
 
     if (!ide_sect_range_ok(s, sector_num, n)) {
         ide_rw_error(s);
@@ -917,7 +1131,11 @@ static void ide_dma_cb(void *opaque, int ret)
     bool stay_active = false;
     int32_t prep_size = 0;
 
+    ide_boot_mark_dma_event(s, "callback", ret, ide_get_sector(s), 0, false);
+
     if (ret == -EINVAL) {
+        ide_boot_mark_dma_event(s, "error-einval", ret, ide_get_sector(s), 0,
+                                false);
         ide_dma_error(s);
         return;
     }
@@ -943,17 +1161,26 @@ static void ide_dma_cb(void *opaque, int ret)
 
     sector_num = ide_get_sector(s);
     if (n > 0) {
+        int64_t completed_sector = sector_num;
+
         assert(n * 512 == s->sg.size);
+        if (s->dma_cmd == IDE_DMA_READ) {
+            ide_boot_mark_xbe_dma_buffer(s, completed_sector, n);
+            xemu_xbe_boot_trace_observe_dma_read(completed_sector, n);
+        }
         ide_dma_buf_commit(s, s->sg.size);
         sector_num += n;
         ide_set_sector(s, sector_num);
         s->nsector -= n;
+        ide_boot_mark_dma_event(s, "advanced", ret, completed_sector, n,
+                                stay_active);
     }
 
     /* end of transfer ? */
     if (s->nsector == 0) {
         s->status = READY_STAT | SEEK_STAT;
         ide_bus_set_irq(s->bus);
+        ide_boot_mark_dma_event(s, "eot", ret, sector_num, 0, stay_active);
         goto eot;
     }
 
@@ -964,6 +1191,7 @@ static void ide_dma_cb(void *opaque, int ret)
     prep_size = s->bus->dma->ops->prepare_buf(s->bus->dma, s->io_buffer_size);
     /* prepare_buf() must succeed and respect the limit */
     assert(prep_size >= 0 && prep_size <= n * 512);
+    ide_boot_mark_dma_event(s, "prepared", ret, sector_num, n, false);
 
     /*
      * Now prep_size stores the number of bytes in the sglist, and
@@ -976,6 +1204,7 @@ static void ide_dma_cb(void *opaque, int ret)
          * Reset the Active bit and don't raise the interrupt.
          */
         s->status = READY_STAT | SEEK_STAT;
+        ide_boot_mark_dma_event(s, "short-prd", ret, sector_num, n, false);
         ide_dma_buf_commit(s, 0);
         goto eot;
     }
@@ -992,18 +1221,23 @@ static void ide_dma_cb(void *opaque, int ret)
     offset = sector_num << BDRV_SECTOR_BITS;
     switch (s->dma_cmd) {
     case IDE_DMA_READ:
-        ide_boot_mark_hdd_read_once(s, sector_num, n, "dma");
+        ide_boot_mark_hdd_read(s, sector_num, n, "dma");
+        ide_boot_mark_dma_event(s, "submit-read", ret, sector_num, n, false);
         s->bus->dma->aiocb = dma_blk_read(s->blk, &s->sg, offset,
                                           BDRV_SECTOR_SIZE, ide_dma_cb, s);
+        ide_boot_poll_aio_after_submit(s, ret, sector_num, n);
         break;
     case IDE_DMA_WRITE:
+        ide_boot_mark_dma_event(s, "submit-write", ret, sector_num, n, false);
         s->bus->dma->aiocb = dma_blk_write(s->blk, &s->sg, offset,
                                            BDRV_SECTOR_SIZE, ide_dma_cb, s);
+        ide_boot_poll_aio_after_submit(s, ret, sector_num, n);
         break;
     case IDE_DMA_TRIM:
         s->bus->dma->aiocb = dma_blk_io(&s->sg, offset, BDRV_SECTOR_SIZE,
                                         ide_issue_trim, s, ide_dma_cb, s,
                                         DMA_DIRECTION_TO_DEVICE);
+        ide_boot_poll_aio_after_submit(s, ret, sector_num, n);
         break;
     default:
         abort();

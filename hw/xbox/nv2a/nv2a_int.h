@@ -160,7 +160,20 @@ typedef struct NV2ABlockInfo {
 } NV2ABlockInfo;
 extern const NV2ABlockInfo blocktable[NV_NUM_BLOCKS];
 
+typedef struct NV2AIrqTraceState {
+    uint32_t pmc_pending;
+    uint32_t pmc_enabled;
+    uint32_t pcrtc_pending;
+    uint32_t pcrtc_enabled;
+    uint32_t pgraph_pending;
+    uint32_t pgraph_enabled;
+} NV2AIrqTraceState;
+
 void nv2a_update_irq(NV2AState *d);
+void nv2a_irq_trace_capture(NV2AState *d, NV2AIrqTraceState *state);
+void nv2a_boot_trace_irq_source(NV2AState *d, const char *source,
+                                 const char *op, uint64_t value,
+                                 const NV2AIrqTraceState *before);
 
 static inline
 void nv2a_reg_log_read(int block, hwaddr addr, unsigned int size, uint64_t val)

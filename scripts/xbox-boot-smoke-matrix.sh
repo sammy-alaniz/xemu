@@ -110,6 +110,7 @@ fi
 
 if [ -n "${native_log}" ] && [ -n "${wasm_log}" ]; then
     XEMU_COMPARE_MIN_LEVEL="${compare_level}" \
+    XEMU_COMPARE_STORAGE_B3_EQUIV=1 \
         "${repo_root}/scripts/xbox-boot-compare-markers.sh" \
         "${native_log}" "${wasm_log}" | tee "${compare_log}"
 fi

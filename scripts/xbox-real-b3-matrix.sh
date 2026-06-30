@@ -31,6 +31,12 @@ Controls:
   XEMU_REAL_B3_BROWSER_RUNTIME_PORT
                                   Port for browser runtime smoke. Default: 8788.
   XEMU_REAL_B3_BROWSER_RUNTIME_MS  Browser runtime timeout ms. Default: XEMU_SMOKE_MS.
+  XEMU_REAL_B3_BROWSER_RUNTIME_DRIVER
+                                  Browser runtime driver: auto or firefox-bidi.
+                                  Default: auto. auto uses Playwright when it
+                                  resolves, otherwise Firefox BiDi. firefox-bidi
+                                  clears NODE_PATH for this smoke so the
+                                  runtime script uses the Firefox BiDi fallback.
 
 Evidence files:
   real-fixture-manifest.log
@@ -42,6 +48,8 @@ Evidence files:
   compare.log
   browser-block/browser-block-callback-smoke.log
   browser-runtime.log
+  dashboard-xbe-read.log
+  dashboard-xbe-read-browser-runtime.log
   real-b3-matrix.log
 EOF
 }
@@ -62,6 +70,16 @@ smoke_ms="${XEMU_SMOKE_MS:-10000}"
 browser_block_ms="${XEMU_BROWSER_BLOCK_MS:-${smoke_ms}}"
 browser_runtime_port="${XEMU_REAL_B3_BROWSER_RUNTIME_PORT:-8788}"
 browser_runtime_ms="${XEMU_REAL_B3_BROWSER_RUNTIME_MS:-${smoke_ms}}"
+browser_runtime_driver="${XEMU_REAL_B3_BROWSER_RUNTIME_DRIVER:-auto}"
+
+case "${browser_runtime_driver}" in
+    auto|firefox-bidi) ;;
+    *)
+        printf 'BOOT_REAL_B3_MATRIX_RESULT result=fail reason=bad-browser-runtime-driver driver=%s\n' \
+            "${browser_runtime_driver}" >&2
+        exit 2
+        ;;
+esac
 
 case "${out_dir}" in
     /*) ;;
@@ -134,24 +152,43 @@ run_matrix() {
         return
     fi
 
+    native_wasm="skipped"
+    browser_block="skipped"
+    browser_runtime="skipped"
+
     if [ "${skip_native_wasm}" != "1" ]; then
-        XEMU_MATRIX_EXPECT_LEVEL=B3 \
-        XEMU_MATRIX_COMPARE_LEVEL=B3 \
-        XEMU_MATRIX_OUT_DIR="${out_dir}" \
-        XEMU_SMOKE_MS="${smoke_ms}" \
-            "${repo_root}/scripts/xbox-boot-smoke-matrix.sh"
+        if XEMU_MATRIX_EXPECT_LEVEL=B3 \
+            XEMU_MATRIX_COMPARE_LEVEL=B3 \
+            XEMU_MATRIX_OUT_DIR="${out_dir}" \
+            XEMU_SMOKE_MS="${smoke_ms}" \
+                "${repo_root}/scripts/xbox-boot-smoke-matrix.sh"; then
+            native_wasm="pass"
+        else
+            native_wasm="fail"
+        fi
     fi
 
     if [ "${skip_browser_block}" != "1" ]; then
-        XEMU_BROWSER_BLOCK_OUT_DIR="${out_dir}/browser-block" \
-        XEMU_BROWSER_BLOCK_MS="${browser_block_ms}" \
-            "${repo_root}/scripts/xbox-browser-block-callback-smoke.sh"
+        if XEMU_BROWSER_BLOCK_OUT_DIR="${out_dir}/browser-block" \
+            XEMU_BROWSER_BLOCK_MS="${browser_block_ms}" \
+                "${repo_root}/scripts/xbox-browser-block-callback-smoke.sh"; then
+            browser_block="pass"
+        else
+            browser_block="fail"
+        fi
     fi
 
     if [ "${skip_browser_runtime}" != "1" ]; then
         browser_runtime_log="${out_dir}/browser-runtime.log"
-        if ! XEMU_BROWSER_RUNTIME_MODE=real \
+        browser_runtime_env=(env)
+        if [ "${browser_runtime_driver}" = "firefox-bidi" ]; then
+            browser_runtime_env+=(NODE_PATH=)
+        fi
+        printf 'BOOT_REAL_B3_BROWSER_RUNTIME driver=%s log=%s\n' \
+            "${browser_runtime_driver}" "${browser_runtime_log}"
+        if ! "${browser_runtime_env[@]}" XEMU_BROWSER_RUNTIME_MODE=real \
             XEMU_BROWSER_RUNTIME_EXPECT_B3=1 \
+            XEMU_BROWSER_RUNTIME_DUMP_TRANSCRIPT=1 \
             XEMU_BROWSER_RUNTIME_FIXTURE_DIR="${fixture_dir}" \
             XEMU_BROWSER_RUNTIME_PORT="${browser_runtime_port}" \
             XEMU_BROWSER_RUNTIME_BOOT_MS="${browser_runtime_ms}" \
@@ -160,27 +197,19 @@ run_matrix() {
             printf 'BOOT_REAL_B3_MATRIX_RESULT result=fail reason=browser-runtime log=%s\n' \
                 "${browser_runtime_log}" >&2
             cat "${browser_runtime_log}" >&2
-            return 1
+            browser_runtime="fail"
+        else
+            cat "${browser_runtime_log}"
+            browser_runtime="pass"
         fi
-        cat "${browser_runtime_log}"
     fi
 
-    if [ "${skip_native_wasm}" = "1" ]; then
-        native_wasm="skipped"
-    else
-        native_wasm="pass"
-    fi
-
-    if [ "${skip_browser_block}" = "1" ]; then
-        browser_block="skipped"
-    else
-        browser_block="pass"
-    fi
-
-    if [ "${skip_browser_runtime}" = "1" ]; then
-        browser_runtime="skipped"
-    else
-        browser_runtime="pass"
+    if [ "${native_wasm}" = "fail" ] ||
+       [ "${browser_block}" = "fail" ] ||
+       [ "${browser_runtime}" = "fail" ]; then
+        printf 'BOOT_REAL_B3_MATRIX_RESULT result=fail native_wasm=%s browser_block=%s browser_runtime=%s out_dir=%s\n' \
+            "${native_wasm}" "${browser_block}" "${browser_runtime}" "${out_dir}" >&2
+        return 1
     fi
 
     printf 'BOOT_REAL_B3_MATRIX_RESULT result=pass native_wasm=%s browser_block=%s browser_runtime=%s out_dir=%s\n' \
@@ -205,4 +234,20 @@ if [ "${preflight_only}" != "1" ]; then
     if [ "${evidence_status}" -ne 0 ]; then
         exit "${evidence_status}"
     fi
+
+    set +e
+    "${repo_root}/scripts/xbox-dashboard-xbe-read-evidence.py" \
+        --hdd "${XEMU_HDD}" \
+        --log "${matrix_log}" >"${out_dir}/dashboard-xbe-read.log" 2>&1
+    dashboard_xbe_status="$?"
+    cat "${out_dir}/dashboard-xbe-read.log" | tee -a "${matrix_log}"
+
+    "${repo_root}/scripts/xbox-dashboard-xbe-read-evidence.py" \
+        --hdd "${XEMU_HDD}" \
+        --log "${matrix_log}" \
+        --require-context browser-runtime \
+            >"${out_dir}/dashboard-xbe-read-browser-runtime.log" 2>&1
+    dashboard_xbe_browser_status="$?"
+    cat "${out_dir}/dashboard-xbe-read-browser-runtime.log" | tee -a "${matrix_log}"
+    set -e
 fi

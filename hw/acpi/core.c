@@ -32,6 +32,7 @@
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "system/runstate.h"
+#include "xemu-xbe.h"
 #include "trace.h"
 
 struct acpi_table_header {
@@ -449,13 +450,41 @@ static void acpi_pm_evt_write(void *opaque, hwaddr addr, uint64_t val,
                               unsigned width)
 {
     ACPIREGS *ar = opaque;
+    uint16_t pm1_sts_before;
+    uint16_t pm1_sts_after;
+    uint16_t pm1_en_before;
+    int64_t overflow_before;
+    bool timer_enabled_after;
+
     switch (addr) {
     case 0:
+        pm1_sts_before = acpi_pm1_evt_get_sts(ar);
+        pm1_en_before = ar->pm1.evt.en;
+        overflow_before = ar->tmr.overflow_time;
         acpi_pm1_evt_write_sts(ar, val);
+        pm1_sts_after = acpi_pm1_evt_get_sts(ar);
+        timer_enabled_after =
+            (ar->pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
+            !(pm1_sts_after & ACPI_BITMASK_TIMER_STATUS);
+        xemu_xbe_boot_trace_observe_xbox_pm_evt_write(
+            "sts", addr, val, width, pm1_sts_before, pm1_sts_after,
+            pm1_en_before, ar->pm1.evt.en, overflow_before,
+            ar->tmr.overflow_time, timer_enabled_after);
         ar->pm1.evt.update_sci(ar);
         break;
     case 2:
+        pm1_sts_before = acpi_pm1_evt_get_sts(ar);
+        pm1_en_before = ar->pm1.evt.en;
+        overflow_before = ar->tmr.overflow_time;
         acpi_pm1_evt_write_en(ar, val);
+        pm1_sts_after = acpi_pm1_evt_get_sts(ar);
+        timer_enabled_after =
+            (ar->pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
+            !(pm1_sts_after & ACPI_BITMASK_TIMER_STATUS);
+        xemu_xbe_boot_trace_observe_xbox_pm_evt_write(
+            "en", addr, val, width, pm1_sts_before, pm1_sts_after,
+            pm1_en_before, ar->pm1.evt.en, overflow_before,
+            ar->tmr.overflow_time, timer_enabled_after);
         ar->pm1.evt.update_sci(ar);
         break;
     }
@@ -523,8 +552,16 @@ static uint32_t acpi_pm_tmr_get(ACPIREGS *ar)
 static void acpi_pm_tmr_timer(void *opaque)
 {
     ACPIREGS *ar = opaque;
+    uint16_t pm1_sts_before = ar->pm1.evt.sts;
+    uint16_t pm1_en = ar->pm1.evt.en;
+    int64_t virtual_now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t timer_ticks = acpi_pm_tmr_get_clock();
+    int64_t overflow_time = ar->tmr.overflow_time;
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_PMTIMER, NULL);
+    xemu_xbe_boot_trace_observe_xbox_pm_timer(
+        "callback", virtual_now_ns, timer_ticks, overflow_time,
+        pm1_sts_before, ar->pm1.evt.sts, pm1_en);
     ar->tmr.update_sci(ar);
 }
 

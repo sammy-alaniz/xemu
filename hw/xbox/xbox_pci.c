@@ -43,6 +43,7 @@
 #include "hw/xbox/xbox_pci.h"
 #include "hw/irq.h"
 #include "migration/vmstate.h"
+#include "xemu-xbe.h"
 
  /*
   * xbox chipset based on nForce 420, which was based on AMD-760
@@ -75,30 +76,77 @@
 #define XBOX_LPC_PIRQ_ROUT     0x68
 #define XBOX_LPC_INT_IRQ_ROUT  0x6C
 
+static const char *xbox_lpc_internal_irq_source(int input_irq)
+{
+    switch (input_irq) {
+    case 0: return "usb0";
+    case 1: return "usb1";
+    case 2: return "nvnet";
+    case 3: return "mcpx-apu";
+    case 4: return "mcpx-aci";
+    case 5: return "hostbridge";
+    case 6: return "ide";
+    case 7: return "lpc-smbus";
+    default: return "internal-unknown";
+    }
+}
+
+static const char *xbox_lpc_pirq_source(int input_irq)
+{
+    switch (input_irq - XBOX_NUM_INT_IRQS) {
+    case 0: return "pirq-a";
+    case 1: return "pirq-b";
+    case 2: return "pirq-c";
+    case 3: return "pirq-d";
+    default: return "pirq-unknown";
+    }
+}
+
 static void xbox_lpc_set_irq(void *opaque, int pirq, int level)
 {
     XBOX_LPCState *lpc = opaque;
+    int input_irq = pirq;
     int pic_irq;
+    uint32_t acpi_route =
+        pci_get_long(lpc->dev.config + XBOX_LPC_ACPI_IRQ_ROUT);
+    uint32_t int_route =
+        pci_get_long(lpc->dev.config + XBOX_LPC_INT_IRQ_ROUT);
+    uint32_t pirq_route =
+        pci_get_long(lpc->dev.config + XBOX_LPC_PIRQ_ROUT);
+    const char *route_type;
+    const char *source;
 
     assert(pirq >= 0);
     assert(pirq < XBOX_NUM_INT_IRQS + XBOX_NUM_PIRQS);
 
     if (pirq < XBOX_NUM_INT_IRQS) {
         /* devices on the internal bus */
-        uint32_t routing = pci_get_long(lpc->dev.config + XBOX_LPC_INT_IRQ_ROUT);
-        pic_irq = (routing >> (pirq * 4)) & 0xF;
+        route_type = "internal";
+        source = xbox_lpc_internal_irq_source(input_irq);
+        pic_irq = (int_route >> (pirq * 4)) & 0xF;
         if (pic_irq == 0) {
+            xemu_xbe_boot_trace_observe_lpc_irq_route(
+                source, route_type, input_irq, pic_irq, level, acpi_route,
+                int_route, pirq_route, false);
             return;
         }
     } else {
         /* pirqs */
+        route_type = "pirq";
+        source = xbox_lpc_pirq_source(input_irq);
         pirq -= XBOX_NUM_INT_IRQS;
         pic_irq = lpc->dev.config[XBOX_LPC_PIRQ_ROUT + pirq];
     }
 
     if (pic_irq >= XBOX_NUM_PIC_IRQS) {
+        xemu_xbe_boot_trace_observe_lpc_irq_route(
+            source, route_type, input_irq, pic_irq, level, acpi_route,
+            int_route, pirq_route, false);
         return;
     }
+    xemu_xbe_boot_trace_observe_lpc_irq_route(
+        source, route_type, input_irq, pic_irq, level, acpi_route, int_route,
+        pirq_route, true);
     qemu_set_irq(lpc->pic[pic_irq], level);
 }
 
@@ -146,14 +194,29 @@ static int xbox_lpc_map_irq(PCIDevice *pci_dev, int intx)
 static void xbox_lpc_set_acpi_irq(void *opaque, int irq_num, int level)
 {
     XBOX_LPCState *lpc = opaque;
+    uint32_t acpi_route;
+    uint32_t int_route;
+    uint32_t pirq_route;
+    const char *source;
+
     assert(irq_num == 0 || irq_num == 1);
 
-    uint32_t routing = pci_get_long(lpc->dev.config + XBOX_LPC_ACPI_IRQ_ROUT);
-    int irq = (routing >> (irq_num * 8)) & 0xff;
+    acpi_route = pci_get_long(lpc->dev.config + XBOX_LPC_ACPI_IRQ_ROUT);
+    int_route = pci_get_long(lpc->dev.config + XBOX_LPC_INT_IRQ_ROUT);
+    pirq_route = pci_get_long(lpc->dev.config + XBOX_LPC_PIRQ_ROUT);
+    source = irq_num == 0 ? "pm" : "smbus";
+
+    int irq = (acpi_route >> (irq_num * 8)) & 0xff;
 
     if (irq == 0 || irq >= XBOX_NUM_PIC_IRQS) {
+        xemu_xbe_boot_trace_observe_lpc_irq_route(
+            source, "acpi", irq_num, irq, level, acpi_route, int_route,
+            pirq_route, false);
         return;
     }
+    xemu_xbe_boot_trace_observe_lpc_irq_route(
+        source, "acpi", irq_num, irq, level, acpi_route, int_route,
+        pirq_route, true);
     qemu_set_irq(lpc->pic[irq], level);
 }
 

@@ -842,7 +842,7 @@ AddressSpace *cpu_get_address_space(CPUState *cpu, int asidx)
     return cpu->cpu_ases[asidx].as;
 }
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
 
 static inline bool access_callback_address_matches(MemAccessCallback *cb,
                                                    hwaddr addr, hwaddr len)
@@ -943,7 +943,7 @@ void mem_check_access_callback_ramaddr(CPUState *cpu,
     }
 }
 
-#endif // ifdef XBOX
+#endif
 
 /* Called from RCU critical section */
 static RAMBlock *qemu_get_ram_block(ram_addr_t addr)
@@ -3421,10 +3421,12 @@ static MemTxResult flatview_write_continue(FlatView *fv, hwaddr addr,
     MemTxResult result = MEMTX_OK;
     const uint8_t *buf = ptr;
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     CPUState *cpu = qemu_get_cpu(0);
-    ram_addr_t ram_addr = mr_addr + memory_region_get_ram_addr(mr);
-    mem_check_access_callback_ramaddr(cpu, ram_addr, len, BP_MEM_WRITE);
+    if (cpu) {
+        ram_addr_t ram_addr = mr_addr + memory_region_get_ram_addr(mr);
+        mem_check_access_callback_ramaddr(cpu, ram_addr, len, BP_MEM_WRITE);
+    }
 #endif
 
     for (;;) {
@@ -3518,10 +3520,12 @@ MemTxResult flatview_read_continue(FlatView *fv, hwaddr addr,
     MemTxResult result = MEMTX_OK;
     uint8_t *buf = ptr;
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     CPUState *cpu = qemu_get_cpu(0);
-    ram_addr_t ram_addr = mr_addr + memory_region_get_ram_addr(mr);
-    mem_check_access_callback_ramaddr(cpu, ram_addr, len, BP_MEM_READ);
+    if (cpu) {
+        ram_addr_t ram_addr = mr_addr + memory_region_get_ram_addr(mr);
+        mem_check_access_callback_ramaddr(cpu, ram_addr, len, BP_MEM_READ);
+    }
 #endif
 
     fuzz_dma_read_cb(addr, len, mr);
