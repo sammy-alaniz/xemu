@@ -48,6 +48,68 @@
 #include "tcg-accel-ops-rr.h"
 #include "tcg-accel-ops-icount.h"
 
+static bool xemu_call_chain_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE_CALL_CHAIN");
+
+    if (value && value[0]) {
+        return strcmp(value, "0");
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    static bool initialized;
+    static bool enabled;
+    const char *paths[] = {
+        "/xemu-fixtures/call_chain_trace.txt",
+        "/xemu-smoke/call_chain_trace.txt",
+        "/xemu-smoke-out/call_chain_trace.txt",
+        NULL,
+    };
+    char buffer[32];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, sizeof(buffer), fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (!buffer[0]) {
+            continue;
+        }
+
+        enabled = g_ascii_strcasecmp(buffer, "0") &&
+                  g_ascii_strcasecmp(buffer, "false") &&
+                  g_ascii_strcasecmp(buffer, "no") &&
+                  g_ascii_strcasecmp(buffer, "off");
+        return enabled;
+    }
+#endif
+
+    return false;
+}
+
+static void xemu_call_chain_trace_once(bool *emitted, const char *event,
+                                       const char *method)
+{
+    if (!*emitted && xemu_call_chain_trace_enabled()) {
+        *emitted = true;
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
 /* common functionality among all TCG variants */
 
 void tcg_cpu_init_cflags(CPUState *cpu, bool parallel)
@@ -76,11 +138,24 @@ void tcg_cpu_destroy(CPUState *cpu)
 
 int tcg_cpu_exec(CPUState *cpu)
 {
+    static bool tcg_loop_started_emitted;
+    static bool tcg_loop_ended_emitted;
+    static bool tcg_cpu_exec_started_emitted;
+    static bool tcg_cpu_exec_ended_emitted;
     int ret;
+
+    xemu_call_chain_trace_once(&tcg_loop_started_emitted, "started",
+                               "TCG vCPU execution loop");
+    xemu_call_chain_trace_once(&tcg_cpu_exec_started_emitted, "started",
+                               "tcg_cpu_exec");
     assert(tcg_enabled());
     cpu_exec_start(cpu);
     ret = cpu_exec(cpu);
     cpu_exec_end(cpu);
+    xemu_call_chain_trace_once(&tcg_cpu_exec_ended_emitted, "ended",
+                               "tcg_cpu_exec");
+    xemu_call_chain_trace_once(&tcg_loop_ended_emitted, "ended",
+                               "TCG vCPU execution loop");
 
     return ret;
 }

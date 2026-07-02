@@ -36,9 +36,11 @@
 #include "qemu/queue.h"
 #include "qom/object.h"
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
 #include "xemu-xbe.h"
+#endif
 
+#ifdef XBOX
 /* FIXME: This is a slightly incomplete implementation of moving
  * QEMU to a dedicated glib context.
  *
@@ -653,7 +655,7 @@ void main_loop_wait(int nonblocking)
     };
     int ret;
     int64_t timeout_ns;
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     int64_t virtual_now_before;
     int64_t virtual_deadline_before;
     int64_t virtual_now_after;
@@ -684,7 +686,7 @@ void main_loop_wait(int nonblocking)
                                       timerlistgroup_deadline_ns(
                                           &main_loop_tlg));
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     virtual_deadline_before =
         qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
@@ -703,7 +705,7 @@ void main_loop_wait(int nonblocking)
          */
         icount_start_warp_timer();
     }
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     timers_progress = qemu_clock_run_all_timers();
     virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     virtual_deadline_after =

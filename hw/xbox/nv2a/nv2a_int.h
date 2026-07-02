@@ -174,6 +174,15 @@ void nv2a_irq_trace_capture(NV2AState *d, NV2AIrqTraceState *state);
 void nv2a_boot_trace_irq_source(NV2AState *d, const char *source,
                                  const char *op, uint64_t value,
                                  const NV2AIrqTraceState *before);
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+void nv2a_browser_deterministic_pcrtc_prestream_maybe_raise(
+    NV2AState *d, const char *trigger,
+    uint32_t dma_get_before, uint32_t dma_get_after, uint32_t dma_put,
+    uint32_t method, uint32_t parameter, size_t available, int64_t processed,
+    bool fifo_access, bool pfifo_halt, bool pfifo_kick,
+    bool pgraph_waiting_flip, bool pgraph_waiting_nop,
+    bool pgraph_waiting_context);
+#endif
 
 static inline
 void nv2a_reg_log_read(int block, hwaddr addr, unsigned int size, uint64_t val)
@@ -220,6 +229,8 @@ DEFINE_PROTO(prmdio)
 // DEFINE_PROTO(pramin)
 DEFINE_PROTO(user)
 #undef DEFINE_PROTO
+
+void user_boot_trace_init(void);
 
 DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address);
 void *nv_dma_map(NV2AState *d, hwaddr dma_obj_address, hwaddr *len);

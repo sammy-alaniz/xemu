@@ -29,8 +29,10 @@
 #include "system/dma.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/target_page.h"
+#include "hw/xbox/nv2a/nv2a_regs.h"
 
 #define XEMU_XBE_MAX_HEADERS (8 * TARGET_PAGE_SIZE)
 #define XEMU_XBE_PHYS_SCAN_CHUNK_SIZE (64 * 1024)
@@ -61,6 +63,7 @@
 #define XEMU_XBE_IRET_DEFAULT_LIMIT 256
 #define XEMU_XBE_PIT_IRQ_DEFAULT_LIMIT 128
 #define XEMU_XBE_MAIN_LOOP_TIMER_DEFAULT_LIMIT 128
+#define XEMU_XBE_TIMER_OPPORTUNITY_DEFAULT_LIMIT 128
 #define XEMU_XBE_TCG_TIMER_PUMP_DEFAULT_LIMIT 64
 #define XEMU_XBE_TCG_TIMER_PUMP_GATE_DEFAULT_LIMIT 64
 #define XEMU_XBE_TCG_TIMER_PUMP_AFTER_IDLE_DEFAULT_LIMIT \
@@ -68,11 +71,22 @@
 #define XEMU_XBE_TCG_TIMER_PUMP_DEFAULT_INTERVAL 0
 #define XEMU_XBE_TCG_TIMER_PUMP_IDLE_LOOP_PC_1 UINT64_C(0x8001b02f)
 #define XEMU_XBE_TCG_TIMER_PUMP_IDLE_LOOP_PC_2 UINT64_C(0x8001b030)
+#define XEMU_XBE_FIRST_READ_PREDECESSOR_PC_BROWSER UINT64_C(0x80014f32)
+#define XEMU_XBE_FIRST_READ_PREDECESSOR_PC_NATIVE UINT64_C(0x80014f5f)
 #define XEMU_XBE_MEMORY_WATCH_DEFAULT_LIMIT 32
 #define XEMU_XBE_MEMORY_WATCH_BYTES 4
 #define XEMU_XBE_EXEC_CODE_PROBE_BYTES 16
 #define XEMU_XBE_EXEC_EDGE_MAX 64
 #define XEMU_XBE_EXEC_EDGE_DEFAULT_LIMIT 64
+#define XEMU_XBE_TICK_BLOCK_PC UINT64_C(0x80030e84)
+#define XEMU_XBE_TICK_BLOCK_NEXT_PC UINT64_C(0x80030f31)
+#define XEMU_XBE_TICK_BLOCK_WATCH_PHYS UINT64_C(0x0003a890)
+#define XEMU_XBE_TICK_BLOCK_TICK_UNIT UINT32_C(0x00002710)
+#define XEMU_XBE_TICK_BLOCK_DEFAULT_LIMIT 256
+#define XEMU_XBE_TICK_BLOCK_IRQ_DEFER_DEFAULT_LIMIT 8
+#define XEMU_XBE_PRE_FIRST_READ_SCHEDULER_DEFAULT_TB_BUDGET 512
+#define XEMU_XBE_EDGE_DECISION_PC XEMU_XBE_TICK_BLOCK_PC
+#define XEMU_XBE_EDGE_DECISION_CMP_ADDR UINT64_C(0x80035c34)
 #define XEMU_XBE_IDE_SECTOR_SIZE 512
 #define XEMU_XBE_LOW_RAM_BYTES (64ULL * 1024 * 1024)
 #define XEMU_XBE_IRQ_STACK_WORDS 8
@@ -116,6 +130,13 @@ struct xemu_xbe_loaded_observation {
     uint64_t exec_dispatch_probe_count;
     uint64_t exec_kernel_loop_probe_count;
     uint64_t exec_kernel_loop_after_idle_probe_count;
+    uint64_t exec_edge_decision_probe_count;
+    uint64_t exec_edge_decision_skip_count;
+    uint64_t exec_tick_block_probe_count;
+    uint64_t exec_tick_block_pre_stream_count;
+    uint64_t exec_tick_block_irq_defer_probe_count;
+    uint64_t pre_first_read_scheduler_probe_count;
+    uint64_t pre_first_read_scheduler_gate_probe_count;
     uint64_t exec_alias_compare_probe_count;
     uint64_t exec_phys_compare_probe_count;
     uint64_t entry_probe_count;
@@ -167,6 +188,68 @@ static struct xemu_xbe_exec_edge_observation
 static struct xemu_xbe_exec_transition_snapshot
     xemu_xbe_latest_exec_transition;
 
+static bool xemu_call_chain_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE_CALL_CHAIN");
+
+    if (value && value[0]) {
+        return strcmp(value, "0");
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    static bool initialized;
+    static bool enabled;
+    const char *paths[] = {
+        "/xemu-fixtures/call_chain_trace.txt",
+        "/xemu-smoke/call_chain_trace.txt",
+        "/xemu-smoke-out/call_chain_trace.txt",
+        NULL,
+    };
+    char buffer[32];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, sizeof(buffer), fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (!buffer[0]) {
+            continue;
+        }
+
+        enabled = g_ascii_strcasecmp(buffer, "0") &&
+                  g_ascii_strcasecmp(buffer, "false") &&
+                  g_ascii_strcasecmp(buffer, "no") &&
+                  g_ascii_strcasecmp(buffer, "off");
+        return enabled;
+    }
+#endif
+
+    return false;
+}
+
+static void xemu_call_chain_trace_once(bool *emitted, const char *event,
+                                       const char *method)
+{
+    if (!*emitted && xemu_call_chain_trace_enabled()) {
+        *emitted = true;
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
 struct xemu_xbe_nv2a_wait_snapshot {
     bool present;
     uint64_t generation;
@@ -197,6 +280,8 @@ struct xemu_xbe_tcg_timer_pump_trace {
 static QemuMutex xemu_xbe_nv2a_wait_snapshot_lock;
 static struct xemu_xbe_nv2a_wait_snapshot
     xemu_xbe_nv2a_wait_snapshot;
+static struct xemu_xbe_nv2a_wait_snapshot
+    xemu_xbe_last_pfifo_stream_idle_snapshot;
 static struct xemu_xbe_pfifo_activity_snapshot
     xemu_xbe_pfifo_activity_snapshot;
 static struct xemu_xbe_tcg_timer_pump_trace xemu_xbe_tcg_timer_pump_trace;
@@ -221,9 +306,14 @@ static int64_t xemu_xbe_cpu_hard_irq_probe_limit(void);
 static int64_t xemu_xbe_iret_probe_limit(void);
 static int64_t xemu_xbe_pit_irq_probe_limit(void);
 static int64_t xemu_xbe_main_loop_timer_probe_limit(void);
+static int64_t xemu_xbe_timer_opportunity_probe_limit(void);
 static int64_t xemu_xbe_tcg_timer_pump_probe_limit(void);
 static int64_t xemu_xbe_tcg_timer_pump_gate_probe_limit(void);
 static int64_t xemu_xbe_tcg_timer_pump_after_idle_probe_limit(void);
+static int64_t xemu_xbe_tick_block_probe_limit(void);
+static int64_t xemu_xbe_tick_block_irq_defer_probe_limit(void);
+static bool xemu_xbe_tick_block_irq_defer_enabled(void);
+static int64_t xemu_xbe_pre_first_read_scheduler_tb_budget(void);
 #if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
 static int64_t xemu_xbe_memory_watch_limit(void);
 static uint64_t xemu_xbe_memory_watch_phys(void);
@@ -237,6 +327,8 @@ static const char *xemu_xbe_memory_watch_access_mode_name(void);
 static bool xemu_xbe_irq_after_pfifo_empty_only(void);
 static bool xemu_xbe_irq_watch_matches(int guest_irq);
 static const char *xemu_xbe_browser_headless_timer_pump_mode(void);
+static const char *xemu_xbe_main_loop_timer_pump_block_reason(
+    const struct xemu_xbe_nv2a_wait_snapshot *wait_state);
 static bool xemu_xbe_timer_pump_idle_loop_before_pfifo_transition_ready(
     const struct xemu_xbe_nv2a_wait_snapshot *wait_state,
     bool activity_gate,
@@ -244,6 +336,10 @@ static bool xemu_xbe_timer_pump_idle_loop_before_pfifo_transition_ready(
     const char *mode);
 static bool xemu_xbe_nv2a_wait_is_stream_idle(
     const struct xemu_xbe_nv2a_wait_snapshot *snapshot);
+static void xemu_xbe_boot_trace_record_pfifo_stream_idle_state(
+    const XemuXbeBootTraceNv2aWaitState *state);
+static void xemu_xbe_boot_trace_latest_pfifo_stream_idle_state(
+    struct xemu_xbe_nv2a_wait_snapshot *snapshot);
 static bool xemu_xbe_pfifo_stream_idle_transition_observed(void);
 static bool xemu_xbe_boot_trace_read_fixture_setting(const char *file_name,
                                                      char *buffer,
@@ -256,9 +352,21 @@ static uint64_t xemu_xbe_boot_trace_u64_setting(const char *env_name,
                                                 const char *file_name,
                                                 uint64_t default_value);
 #endif
+static int64_t xemu_xbe_edge_decision_limit(void);
 static void xemu_xbe_boot_trace_memory_watch_install(void);
 static bool xemu_xbe_boot_trace_memory_watch_sample(uint64_t *phys_out,
                                                     uint32_t *value_out);
+static bool xemu_xbe_read_phys_u32(hwaddr phys_addr, uint32_t *value);
+static void xemu_xbe_pre_first_read_scheduler_note_timer_pump(bool progress);
+static void xemu_xbe_pre_first_read_scheduler_note_first_read(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    const char *source);
+static void xemu_xbe_pre_first_read_scheduler_note_tick_block(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    int tb_exit,
+    const char *source);
 
 static void xemu_xbe_nv2a_wait_snapshot_lock_guard(void)
 {
@@ -323,6 +431,12 @@ struct xemu_xbe_exec_context {
     int32_t cpu_exception_index;
 };
 
+static const char *xemu_xbe_tcg_timer_pump_before_pfifo_gate_reason(
+    struct xemu_xbe_exec_context *exec_ctx,
+    struct xemu_xbe_pfifo_activity_snapshot *activity,
+    uint32_t *activity_dma_to_put,
+    bool activity_gate);
+
 struct xemu_xbe_stack_probe {
     bool read_ok;
     uint64_t hash;
@@ -357,6 +471,56 @@ struct xemu_xbe_code_probe {
     bool mem_value_read;
     uint32_t mem_value;
 };
+
+struct xemu_xbe_edge_decision_snapshot {
+    bool valid;
+    uint64_t seq;
+    uint64_t start_pc;
+    uint32_t tb_size;
+    const char *source;
+    struct xemu_xbe_exec_context pre_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    struct xemu_xbe_code_probe start_code_probe;
+    bool watch_value_read;
+    uint32_t watch_value;
+    bool cmp_mapping_known;
+    uint64_t cmp_phys;
+    bool cmp_value_read;
+    uint32_t cmp_value;
+};
+
+static struct xemu_xbe_edge_decision_snapshot
+    xemu_xbe_edge_decision_pending;
+
+struct xemu_xbe_tick_block_snapshot {
+    bool valid;
+    uint64_t start_pc;
+    uint32_t tb_size;
+    const char *source;
+    struct xemu_xbe_exec_context pre_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot pre_wait_state;
+    bool pre_watch_value_read;
+    uint32_t pre_watch_value;
+};
+
+static struct xemu_xbe_tick_block_snapshot xemu_xbe_tick_block_pending;
+
+struct xemu_xbe_pre_first_read_scheduler_state {
+    bool active;
+    bool done;
+    bool first_read_seen;
+    bool first_read_before_tick_block;
+    uint64_t seq;
+    uint64_t tb_count;
+    uint64_t timer_pump_count;
+    uint64_t timer_delivery_count;
+    uint64_t start_tick_block_count;
+    uint64_t start_edge_decision_count;
+    uint64_t start_skip_count;
+};
+
+static struct xemu_xbe_pre_first_read_scheduler_state
+    xemu_xbe_pre_first_read_scheduler;
 
 struct xemu_xbe_target_classification {
     const char *relation;
@@ -485,6 +649,30 @@ void xemu_xbe_boot_trace_observe_nv2a_wait_state(
     qemu_mutex_unlock(&xemu_xbe_nv2a_wait_snapshot_lock);
 }
 
+static void xemu_xbe_boot_trace_record_pfifo_stream_idle_state(
+    const XemuXbeBootTraceNv2aWaitState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    xemu_xbe_nv2a_wait_snapshot_lock_guard();
+    xemu_xbe_last_pfifo_stream_idle_snapshot.present = true;
+    xemu_xbe_last_pfifo_stream_idle_snapshot.generation++;
+    xemu_xbe_last_pfifo_stream_idle_snapshot.state = *state;
+    g_strlcpy(xemu_xbe_last_pfifo_stream_idle_snapshot.source,
+              state->source ? state->source : "unknown",
+              sizeof(xemu_xbe_last_pfifo_stream_idle_snapshot.source));
+    g_strlcpy(xemu_xbe_last_pfifo_stream_idle_snapshot.op,
+              state->op ? state->op : "unknown",
+              sizeof(xemu_xbe_last_pfifo_stream_idle_snapshot.op));
+    xemu_xbe_last_pfifo_stream_idle_snapshot.state.source =
+        xemu_xbe_last_pfifo_stream_idle_snapshot.source;
+    xemu_xbe_last_pfifo_stream_idle_snapshot.state.op =
+        xemu_xbe_last_pfifo_stream_idle_snapshot.op;
+    qemu_mutex_unlock(&xemu_xbe_nv2a_wait_snapshot_lock);
+}
+
 void xemu_xbe_boot_trace_observe_pfifo_activity(
     const XemuXbeBootTracePfifoActivityState *state)
 {
@@ -532,6 +720,7 @@ void xemu_xbe_boot_trace_observe_pfifo_stream_idle_boundary(
 
     seq++;
     qatomic_set(&xemu_xbe_pfifo_stream_idle_transition_seen, true);
+    xemu_xbe_boot_trace_record_pfifo_stream_idle_state(state);
     xemu_xbe_capture_exec_context(&exec_ctx);
     fprintf(stderr,
             "BOOT_MARK b6 pfifo=stream-idle-boundary context=%s"
@@ -720,6 +909,17 @@ static void xemu_xbe_boot_trace_latest_nv2a_wait_state(
     snapshot->state.op = snapshot->op;
 }
 
+static void xemu_xbe_boot_trace_latest_pfifo_stream_idle_state(
+    struct xemu_xbe_nv2a_wait_snapshot *snapshot)
+{
+    xemu_xbe_nv2a_wait_snapshot_lock_guard();
+    *snapshot = xemu_xbe_last_pfifo_stream_idle_snapshot;
+    qemu_mutex_unlock(&xemu_xbe_nv2a_wait_snapshot_lock);
+
+    snapshot->state.source = snapshot->source;
+    snapshot->state.op = snapshot->op;
+}
+
 static void xemu_xbe_boot_trace_latest_pfifo_activity(
     struct xemu_xbe_pfifo_activity_snapshot *snapshot)
 {
@@ -739,6 +939,22 @@ static bool xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(
            !strcmp(snapshot->state.op, "pusher-empty");
 }
 
+static const char *xemu_xbe_nv2a_wait_pfifo_empty_blocker(
+    const struct xemu_xbe_nv2a_wait_snapshot *snapshot)
+{
+    if (!snapshot || !snapshot->present) {
+        return "wait-missing";
+    }
+    if (strcmp(snapshot->state.source, "pfifo-window")) {
+        return "wait-source-not-pfifo-window";
+    }
+    if (strcmp(snapshot->state.op, "pusher-empty")) {
+        return "wait-op-not-pusher-empty";
+    }
+
+    return "none";
+}
+
 static bool xemu_xbe_nv2a_wait_snapshot_is_pcrtc_wait(
     const struct xemu_xbe_nv2a_wait_snapshot *snapshot)
 {
@@ -748,6 +964,17 @@ static bool xemu_xbe_nv2a_wait_snapshot_is_pcrtc_wait(
             !strcmp(snapshot->state.op, "intr-enable") ||
             !strcmp(snapshot->state.op, "vblank-suppress") ||
             !strcmp(snapshot->state.op, "vblank-raise"));
+}
+
+static bool xemu_xbe_nv2a_wait_snapshot_is_pcrtc_intr_clear(
+    const struct xemu_xbe_nv2a_wait_snapshot *snapshot)
+{
+    return snapshot && snapshot->present &&
+           !strcmp(snapshot->state.source, "pcrtc") &&
+           !strcmp(snapshot->state.op, "intr-clear") &&
+           (snapshot->state.pcrtc_enabled & NV_PCRTC_INTR_0_VBLANK) &&
+           !(snapshot->state.pcrtc_pending & NV_PCRTC_INTR_0_VBLANK) &&
+           !(snapshot->state.pmc_pending & NV_PMC_INTR_0_PCRTC);
 }
 
 static bool xemu_xbe_irq_trace_gate_allows(
@@ -783,7 +1010,13 @@ static bool xemu_xbe_browser_headless_timer_pump_mode_is_pretransition(
                 "pfifo-before-transition-activity-then-after-pfifo-empty") ||
             !g_ascii_strcasecmp(
                 mode,
-                "pcrtc-before-stream-idle-then-after-pfifo-empty"));
+                "pcrtc-before-stream-idle-then-after-pfifo-empty") ||
+            !g_ascii_strcasecmp(
+                mode,
+                "pcrtc-intr-clear-before-stream-idle-then-after-pfifo-empty") ||
+            !g_ascii_strcasecmp(
+                mode,
+                "deterministic-pcrtc-prestream-tick-window"));
 }
 
 static bool xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge(
@@ -803,13 +1036,48 @@ static bool xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge_all_timers(
            !g_ascii_strcasecmp(mode, "pfifo-ready-edge-qemu-pump-all");
 }
 
+static bool xemu_xbe_browser_headless_timer_pump_mode_is_pcrtc_prestream(
+    const char *mode)
+{
+    return mode &&
+           (!g_ascii_strcasecmp(
+                mode,
+                "pcrtc-intr-clear-before-stream-idle-then-after-pfifo-empty") ||
+            !g_ascii_strcasecmp(
+                mode,
+                "deterministic-pcrtc-prestream-tick-window"));
+}
+
 static bool xemu_xbe_main_loop_timer_source_is_browser_diagnostic(
     const char *source)
 {
     return source &&
            (!strcmp(source, "browser-headless-host-pump-bounded") ||
+            !strcmp(source, "browser-deterministic-pump") ||
+            !strcmp(source, "browser-deterministic-pcrtc-prestream") ||
             !strcmp(source, "browser-ready-edge-qemu-pump") ||
             !strcmp(source, "browser-ready-edge-qemu-pump-all"));
+}
+
+bool xemu_xbe_boot_trace_main_loop_timer_pump_pcrtc_prestream_ready(void)
+{
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    const char *mode;
+
+    if (!xemu_xbe_boot_trace_enabled() ||
+        !xemu_xbe_boot_trace_entry_ready() ||
+        xemu_xbe_main_loop_timer_probe_limit() <= 0) {
+        return false;
+    }
+
+    mode = xemu_xbe_browser_headless_timer_pump_mode();
+    if (!xemu_xbe_browser_headless_timer_pump_mode_is_pcrtc_prestream(mode) ||
+        xemu_xbe_pfifo_stream_idle_transition_observed()) {
+        return false;
+    }
+
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    return xemu_xbe_nv2a_wait_snapshot_is_pcrtc_intr_clear(&wait_state);
 }
 
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void)
@@ -825,6 +1093,17 @@ bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void)
 
     mode = xemu_xbe_browser_headless_timer_pump_mode();
     xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    if (xemu_xbe_browser_headless_timer_pump_mode_is_pcrtc_prestream(mode)) {
+        if (xemu_xbe_pfifo_stream_idle_transition_observed()) {
+            return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(&wait_state);
+        }
+
+        if (xemu_xbe_nv2a_wait_snapshot_is_pcrtc_intr_clear(&wait_state)) {
+            return true;
+        }
+
+        return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(&wait_state);
+    }
     if (!g_ascii_strcasecmp(mode, "entry-ready")) {
         return true;
     }
@@ -864,6 +1143,91 @@ bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void)
     }
 
     return true;
+}
+
+static const char *xemu_xbe_main_loop_timer_pump_block_reason(
+    const struct xemu_xbe_nv2a_wait_snapshot *wait_state)
+{
+    const char *mode;
+
+    if (!xemu_xbe_boot_trace_enabled()) {
+        return "trace-disabled";
+    }
+    if (!xemu_xbe_boot_trace_entry_ready()) {
+        return "entry-not-ready";
+    }
+    if (xemu_xbe_main_loop_timer_probe_limit() <= 0) {
+        return "main-loop-timer-limit";
+    }
+
+    mode = xemu_xbe_browser_headless_timer_pump_mode();
+    if (xemu_xbe_browser_headless_timer_pump_mode_is_pcrtc_prestream(mode)) {
+        if (xemu_xbe_pfifo_stream_idle_transition_observed()) {
+            return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state) ?
+                NULL : "wait-not-pfifo-empty";
+        }
+
+        if (xemu_xbe_nv2a_wait_snapshot_is_pcrtc_intr_clear(wait_state) ||
+            xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state)) {
+            return NULL;
+        }
+
+        return "wait-not-pcrtc-intr-clear-or-pfifo-empty";
+    }
+    if (!g_ascii_strcasecmp(mode, "entry-ready")) {
+        return NULL;
+    }
+    if (!g_ascii_strcasecmp(mode, "after-pfifo-empty")) {
+        return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state) ?
+            NULL : "wait-not-pfifo-empty";
+    }
+    if (!g_ascii_strcasecmp(mode, "pfifo-before-transition-activity")) {
+        struct xemu_xbe_exec_context exec_ctx;
+        struct xemu_xbe_pfifo_activity_snapshot activity;
+        uint32_t activity_dma_to_put = 0;
+
+        return xemu_xbe_tcg_timer_pump_before_pfifo_gate_reason(
+            &exec_ctx, &activity, &activity_dma_to_put, true);
+    }
+    if (!g_ascii_strcasecmp(
+            mode,
+            "pfifo-before-transition-activity-then-after-pfifo-empty")) {
+        if (xemu_xbe_pfifo_stream_idle_transition_observed()) {
+            return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state) ?
+                NULL : "wait-not-pfifo-empty";
+        }
+
+        {
+            struct xemu_xbe_exec_context exec_ctx;
+            struct xemu_xbe_pfifo_activity_snapshot activity;
+            uint32_t activity_dma_to_put = 0;
+
+            return xemu_xbe_tcg_timer_pump_before_pfifo_gate_reason(
+                &exec_ctx, &activity, &activity_dma_to_put, true);
+        }
+    }
+    if (!g_ascii_strcasecmp(
+            mode,
+            "pcrtc-before-stream-idle-then-after-pfifo-empty")) {
+        if (xemu_xbe_pfifo_stream_idle_transition_observed()) {
+            return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state) ?
+                NULL : "wait-not-pfifo-empty";
+        }
+
+        return xemu_xbe_nv2a_wait_snapshot_is_pcrtc_wait(wait_state) ?
+            NULL : "wait-not-pcrtc";
+    }
+    if (xemu_xbe_browser_headless_timer_pump_mode_is_ready_edge(mode)) {
+        return xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state) ?
+            NULL : "wait-not-pfifo-empty";
+    }
+
+    if (xemu_xbe_irq_after_pfifo_empty_only() &&
+        !xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(wait_state)) {
+        return "irq-after-pfifo-empty";
+    }
+
+    return NULL;
 }
 
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_enabled(void)
@@ -982,6 +1346,20 @@ static const char *xemu_xbe_browser_headless_timer_pump_mode(void)
                !g_ascii_strcasecmp(value, "pfifo-stream-idle-ready-edge") ||
                !g_ascii_strcasecmp(value, "ready-edge")) {
         g_strlcpy(mode, "pfifo-ready-edge-qemu-pump", sizeof(mode));
+    } else if (!g_ascii_strcasecmp(
+                   value,
+                   "pcrtc-intr-clear-before-stream-idle-then-after-pfifo-empty") ||
+               !g_ascii_strcasecmp(
+                   value,
+                   "deterministic-pcrtc-prestream-tick-window") ||
+               !g_ascii_strcasecmp(value,
+                                   "pcrtc-intr-clear-prestream") ||
+               !g_ascii_strcasecmp(value,
+                                   "pcrtc-intr-clear-prestream-then-pfifo-empty")) {
+        g_strlcpy(
+            mode,
+            "pcrtc-intr-clear-before-stream-idle-then-after-pfifo-empty",
+            sizeof(mode));
     } else if (!g_ascii_strcasecmp(value, "pfifo-ready-edge-qemu-pump-all") ||
                !g_ascii_strcasecmp(value, "pfifo-ready-edge-all") ||
                !g_ascii_strcasecmp(value, "ready-edge-all") ||
@@ -1059,6 +1437,18 @@ static const char *xemu_xbe_tcg_timer_pump_mode(void)
                !g_ascii_strcasecmp(value, "pfifo-transition") ||
                !g_ascii_strcasecmp(value, "pfifo-transition-pit-only")) {
         g_strlcpy(mode, "pit-after-pfifo-transition", sizeof(mode));
+    } else if (!g_ascii_strcasecmp(value, "pit-post-pfifo-pre-first-read") ||
+               !g_ascii_strcasecmp(value, "pit-after-pfifo-pre-first-read") ||
+               !g_ascii_strcasecmp(value, "post-pfifo-pre-first-read") ||
+               !g_ascii_strcasecmp(value, "pre-first-read")) {
+        g_strlcpy(mode, "pit-post-pfifo-pre-first-read", sizeof(mode));
+    } else if (!g_ascii_strcasecmp(value,
+                                  "pit-pre-first-read-micro-scheduler") ||
+               !g_ascii_strcasecmp(value,
+                                  "pre-first-read-micro-scheduler") ||
+               !g_ascii_strcasecmp(value, "micro-pre-first-read") ||
+               !g_ascii_strcasecmp(value, "pre-first-read-owner")) {
+        g_strlcpy(mode, "pit-pre-first-read-micro-scheduler", sizeof(mode));
     } else if (!g_ascii_strcasecmp(value,
                                   "idle-loop-inhibited-pit-before-pfifo-transition") ||
                !g_ascii_strcasecmp(value,
@@ -1147,9 +1537,21 @@ static bool xemu_xbe_tcg_timer_pump_mode_is_pfifo_pre_commit(
         mode, "pit-at-pfifo-transition-pre-commit-defer-to-idle");
 }
 
+static bool xemu_xbe_tcg_timer_pump_mode_is_pre_first_read_scheduler(
+    const char *mode)
+{
+    return !g_ascii_strcasecmp(mode,
+                               "pit-pre-first-read-micro-scheduler");
+}
+
 static bool xemu_xbe_pfifo_stream_idle_transition_observed(void)
 {
     return qatomic_read(&xemu_xbe_pfifo_stream_idle_transition_seen);
+}
+
+bool xemu_xbe_boot_trace_pfifo_stream_idle_transition_observed(void)
+{
+    return xemu_xbe_pfifo_stream_idle_transition_observed();
 }
 
 static bool xemu_xbe_tcg_timer_pump_idle_loop_ready(void)
@@ -1210,6 +1612,680 @@ static bool xemu_xbe_tcg_timer_pump_idle_loop_serviceable_ready(void)
     return xemu_xbe_exec_context_is_idle_loop_serviceable(&exec_ctx, true);
 }
 
+static bool xemu_xbe_exec_context_is_post_pfifo_pre_first_read_serviceable(
+    const struct xemu_xbe_exec_context *exec_ctx)
+{
+    uint64_t pc;
+
+    if (!exec_ctx ||
+        !exec_ctx->cpu_known ||
+        strcmp(exec_ctx->mode, "protected32") ||
+        exec_ctx->cpl != 0 ||
+        !(exec_ctx->computed_eflags & IF_MASK) ||
+        (exec_ctx->hflags & HF_INHIBIT_IRQ_MASK) ||
+        exec_ctx->cpu_interrupt_request != 0) {
+        return false;
+    }
+
+    pc = exec_ctx->eip & UINT64_C(0xffffffff);
+
+    return pc == XEMU_XBE_TCG_TIMER_PUMP_IDLE_LOOP_PC_2 ||
+           pc == XEMU_XBE_TICK_BLOCK_PC;
+}
+
+static bool xemu_xbe_pre_first_read_scheduler_pc_is_candidate(uint64_t pc)
+{
+    return pc == XEMU_XBE_TCG_TIMER_PUMP_IDLE_LOOP_PC_2 ||
+           pc == XEMU_XBE_FIRST_READ_PREDECESSOR_PC_BROWSER ||
+           pc == XEMU_XBE_FIRST_READ_PREDECESSOR_PC_NATIVE;
+}
+
+static bool xemu_xbe_exec_context_is_pre_first_read_scheduler_serviceable(
+    const struct xemu_xbe_exec_context *exec_ctx)
+{
+    uint64_t pc;
+
+    if (!exec_ctx ||
+        !exec_ctx->cpu_known ||
+        strcmp(exec_ctx->mode, "protected32") ||
+        exec_ctx->cpl != 0 ||
+        !(exec_ctx->computed_eflags & IF_MASK) ||
+        exec_ctx->cpu_interrupt_request != 0) {
+        return false;
+    }
+
+    pc = exec_ctx->eip & UINT64_C(0xffffffff);
+
+    /*
+     * This opt-in owner runs before cpu_handle_interrupt() so the observed
+     * first-read predecessor can still be interrupted before it reaches
+     * 0x80030e84 and consumes the shared word at zero ticks.
+     *
+     * The browser predecessor is the instruction immediately after STI. x86
+     * rules inhibit delivery for that one instruction, but pumping here can
+     * make the IRQ pending for delivery after the RET and before the watched
+     * read at 0x80030e84.
+     */
+    if (pc == XEMU_XBE_FIRST_READ_PREDECESSOR_PC_BROWSER &&
+        (exec_ctx->hflags & HF_INHIBIT_IRQ_MASK)) {
+        return true;
+    }
+    if (exec_ctx->hflags & HF_INHIBIT_IRQ_MASK) {
+        return false;
+    }
+
+    return xemu_xbe_pre_first_read_scheduler_pc_is_candidate(pc);
+}
+
+static const char *xemu_xbe_pre_first_read_scheduler_edge_state(void)
+{
+    const struct xemu_xbe_exec_transition_snapshot *transition =
+        &xemu_xbe_latest_exec_transition;
+
+    if (!transition->valid) {
+        return "none";
+    }
+    if (!transition->next_pc_known) {
+        return "next-unknown";
+    }
+    if (transition->start_pc == XEMU_XBE_TICK_BLOCK_PC &&
+        transition->next_pc == XEMU_XBE_TICK_BLOCK_NEXT_PC) {
+        return "tick-block-useful-edge";
+    }
+    if (transition->start_pc == XEMU_XBE_TICK_BLOCK_PC) {
+        return "tick-block-edge-regressed";
+    }
+
+    return "other-edge";
+}
+
+static bool xemu_xbe_pre_first_read_scheduler_edge_regressed(void)
+{
+    const struct xemu_xbe_exec_transition_snapshot *transition =
+        &xemu_xbe_latest_exec_transition;
+
+    return transition->valid &&
+           transition->next_pc_known &&
+           transition->start_pc == XEMU_XBE_TICK_BLOCK_PC &&
+           transition->next_pc != XEMU_XBE_TICK_BLOCK_NEXT_PC;
+}
+
+static void xemu_xbe_pre_first_read_scheduler_emit(const char *phase,
+                                                   const char *owner,
+                                                   const char *stop_reason,
+                                                   uint64_t guest_pc,
+                                                   uint32_t tb_size,
+                                                   int tb_exit)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+    struct xemu_xbe_exec_context exec_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    const struct xemu_xbe_exec_transition_snapshot *transition =
+        &xemu_xbe_latest_exec_transition;
+    int64_t limit = xemu_xbe_tcg_timer_pump_probe_limit();
+    int64_t tb_budget = xemu_xbe_pre_first_read_scheduler_tb_budget();
+    uint32_t watch_value = 0;
+    uint64_t watch_ticks = 0;
+    bool watch_value_read;
+    uint64_t seq;
+
+    if (!xemu_xbe_boot_trace_enabled() ||
+        limit == 0 ||
+        obs->pre_first_read_scheduler_probe_count >= (uint64_t)limit) {
+        return;
+    }
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    wait_state.state.source = wait_state.source;
+    wait_state.state.op = wait_state.op;
+
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_memory_watch_suppress = true;
+    watch_value_read =
+        xemu_xbe_read_phys_u32(XEMU_XBE_TICK_BLOCK_WATCH_PHYS, &watch_value);
+    xemu_xbe_memory_watch_suppress = false;
+#endif
+    if (watch_value_read) {
+        watch_ticks = watch_value / XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+
+    seq = ++obs->pre_first_read_scheduler_probe_count;
+    state->seq = seq;
+    fprintf(stderr,
+            "BOOT_MARK b6 scheduler=pre-first-read context=%s"
+            " seq=%" PRIu64
+            " phase=%s"
+            " owner=%s"
+            " mode=%s"
+            " stop_reason=%s"
+            " active=%s"
+            " done=%s"
+            " tb_count=%" PRIu64
+            " tb_budget=%" PRId64
+            " timer_pumps=%" PRIu64
+            " timer_deliveries=%" PRIu64
+            " tick_block_completions=%" PRIu64
+            " start_tick_block_completions=%" PRIu64
+            " tick_block_delta=%" PRIu64
+            " first_read_seen=%s"
+            " first_read_before_tick_block=%s"
+            " edge_decision_count=%" PRIu64
+            " start_edge_decision_count=%" PRIu64
+            " edge_decision_delta=%" PRIu64
+            " edge_state=%s"
+            " watch_phys=0x%08" PRIx64
+            " watch_tick_unit=0x%08" PRIx32
+            " watch_value_read=%s"
+            " watch_value=0x%08" PRIx32
+            " watch_ticks=%" PRIu64
+            " guest_pc=0x%08" PRIx64
+            " tb_size=%" PRIu32
+            " tb_exit=%d"
+            " latest_transition_valid=%s"
+            " latest_start_pc=0x%08" PRIx64
+            " latest_next_pc_known=%s"
+            " latest_next_pc=0x%08" PRIx64
+            " latest_tb_exit=%d"
+            " cpu_known=%s"
+            " cpu_mode=%s"
+            " cpl=%" PRIu32
+            " eip=0x%08" PRIx64
+            " eflags=0x%08" PRIx64
+            " interrupts_enabled=%s"
+            " irq_inhibited=%s"
+            " cpu_interrupt_request=0x%08" PRIx32
+            " pending_interrupt=%s"
+            " cpu_exit_request=%s"
+            " wait_present=%s"
+            " stream_idle=%s"
+            " wait_generation=%" PRIu64
+            " wait_source=%s"
+            " wait_op=%s"
+            " wait_seq=%" PRIu64 "\n",
+            xemu_xbe_boot_trace_context(), seq,
+            phase ? phase : "checkpoint",
+            owner ? owner : "unknown",
+            xemu_xbe_tcg_timer_pump_mode(),
+            stop_reason ? stop_reason : "none",
+            xemu_xbe_bool_str(state->active),
+            xemu_xbe_bool_str(state->done),
+            state->tb_count, tb_budget,
+            state->timer_pump_count,
+            state->timer_delivery_count,
+            obs->exec_tick_block_probe_count,
+            state->start_tick_block_count,
+            obs->exec_tick_block_probe_count -
+                state->start_tick_block_count,
+            xemu_xbe_bool_str(state->first_read_seen),
+            xemu_xbe_bool_str(state->first_read_before_tick_block),
+            obs->exec_edge_decision_probe_count,
+            state->start_edge_decision_count,
+            obs->exec_edge_decision_probe_count -
+                state->start_edge_decision_count,
+            xemu_xbe_pre_first_read_scheduler_edge_state(),
+            XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+            XEMU_XBE_TICK_BLOCK_TICK_UNIT,
+            xemu_xbe_bool_str(watch_value_read),
+            watch_value, watch_ticks,
+            guest_pc, tb_size, tb_exit,
+            xemu_xbe_bool_str(transition->valid),
+            transition->valid ? transition->start_pc : 0,
+            xemu_xbe_bool_str(transition->valid &&
+                              transition->next_pc_known),
+            transition->valid && transition->next_pc_known ?
+                transition->next_pc : 0,
+            transition->valid ? transition->tb_exit : 0,
+            xemu_xbe_bool_str(exec_ctx.cpu_known), exec_ctx.mode,
+            exec_ctx.cpl, exec_ctx.eip, exec_ctx.computed_eflags,
+            xemu_xbe_bool_str(exec_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(exec_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            exec_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(exec_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(exec_ctx.cpu_exit_request),
+            xemu_xbe_bool_str(wait_state.present),
+            xemu_xbe_bool_str(xemu_xbe_nv2a_wait_is_stream_idle(&wait_state)),
+            wait_state.generation,
+            wait_state.present ? wait_state.state.source : "none",
+            wait_state.present ? wait_state.state.op : "none",
+            wait_state.present ? wait_state.state.seq : 0);
+}
+
+static void xemu_xbe_pre_first_read_scheduler_finish(const char *phase,
+                                                     const char *owner,
+                                                     const char *stop_reason,
+                                                     uint64_t guest_pc,
+                                                     uint32_t tb_size,
+                                                     int tb_exit)
+{
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+
+    if (!state->active || state->done) {
+        return;
+    }
+
+    state->done = true;
+    xemu_xbe_pre_first_read_scheduler_emit(phase, owner, stop_reason, guest_pc,
+                                           tb_size, tb_exit);
+    state->active = false;
+}
+
+static const char *xemu_xbe_pre_first_read_scheduler_stop_reason(void)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+    int64_t tb_budget = xemu_xbe_pre_first_read_scheduler_tb_budget();
+
+    if (!state->active || state->done) {
+        return NULL;
+    }
+    if (obs->executed_marked) {
+        return "dashboard-executed";
+    }
+    if (state->first_read_before_tick_block) {
+        return "first-read-before-tick-block";
+    }
+    if (obs->exec_tick_block_probe_count > state->start_tick_block_count &&
+        !state->first_read_seen) {
+        return "tick-block-before-first-read";
+    }
+    if (obs->exec_edge_decision_probe_count >
+            state->start_edge_decision_count &&
+        obs->exec_tick_block_probe_count <= state->start_tick_block_count) {
+        return "first-read-before-tick-block";
+    }
+    if (xemu_xbe_pre_first_read_scheduler_edge_regressed()) {
+        return "edge-regressed";
+    }
+    if (tb_budget >= 0 && state->tb_count >= (uint64_t)tb_budget) {
+        return "tb-budget";
+    }
+
+    return NULL;
+}
+
+static void xemu_xbe_pre_first_read_scheduler_maybe_stop(
+    const char *phase,
+    const char *owner,
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    int tb_exit)
+{
+    const char *reason = xemu_xbe_pre_first_read_scheduler_stop_reason();
+
+    if (reason) {
+        xemu_xbe_pre_first_read_scheduler_finish(
+            phase, owner, reason, guest_pc, tb_size, tb_exit);
+    }
+}
+
+static bool xemu_xbe_pre_first_read_scheduler_gate_should_emit(
+    bool mode_match,
+    bool trace_enabled,
+    bool entry_ready,
+    bool loaded,
+    const struct xemu_xbe_exec_context *exec_ctx)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    int64_t limit = xemu_xbe_tcg_timer_pump_gate_probe_limit();
+    uint64_t pc = exec_ctx && exec_ctx->cpu_known ?
+        (exec_ctx->eip & UINT64_C(0xffffffff)) : 0;
+
+    if (!mode_match || !trace_enabled || limit == 0) {
+        return false;
+    }
+    if (obs->pre_first_read_scheduler_gate_probe_count >= (uint64_t)limit) {
+        return false;
+    }
+    (void)loaded;
+
+    /*
+     * Avoid spending the bounded gate budget during early boot. The current
+     * question starts only after the dashboard entry code is known readable.
+     */
+    if (!entry_ready) {
+        return false;
+    }
+
+    return xemu_xbe_pfifo_stream_idle_transition_observed() ||
+           xemu_xbe_pre_first_read_scheduler_pc_is_candidate(pc);
+}
+
+static void xemu_xbe_pre_first_read_scheduler_gate_emit(
+    const char *reason,
+    bool ready,
+    bool mode_match,
+    bool trace_enabled,
+    bool entry_ready,
+    bool loaded,
+    int64_t interval,
+    int64_t tb_budget,
+    int64_t pump_limit,
+    bool pump_limit_exhausted,
+    bool virtual_has_timers,
+    bool virtual_expired,
+    int64_t virtual_now,
+    int64_t virtual_deadline,
+    bool serviceable,
+    const struct xemu_xbe_exec_context *exec_ctx)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    uint64_t pc = exec_ctx && exec_ctx->cpu_known ?
+        (exec_ctx->eip & UINT64_C(0xffffffff)) : 0;
+    uint32_t watch_value = 0;
+    uint64_t watch_ticks = 0;
+    bool watch_value_read = false;
+    uint64_t seq;
+
+    if (!xemu_xbe_pre_first_read_scheduler_gate_should_emit(
+            mode_match, trace_enabled, entry_ready, loaded, exec_ctx)) {
+        return;
+    }
+
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    wait_state.state.source = wait_state.source;
+    wait_state.state.op = wait_state.op;
+
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_memory_watch_suppress = true;
+    watch_value_read =
+        xemu_xbe_read_phys_u32(XEMU_XBE_TICK_BLOCK_WATCH_PHYS, &watch_value);
+    xemu_xbe_memory_watch_suppress = false;
+#endif
+    if (watch_value_read) {
+        watch_ticks = watch_value / XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+
+    seq = ++obs->pre_first_read_scheduler_gate_probe_count;
+    fprintf(stderr,
+            "BOOT_MARK b6 scheduler=pre-first-read-gate context=%s"
+            " seq=%" PRIu64
+            " reason=%s"
+            " ready=%s"
+            " mode_match=%s"
+            " trace_enabled=%s"
+            " entry_ready=%s"
+            " loaded=%s"
+            " interval_tbs=%" PRId64
+            " tb_budget=%" PRId64
+            " pump_limit=%" PRId64
+            " pump_limit_exhausted=%s"
+            " scheduler_active=%s"
+            " scheduler_done=%s"
+            " scheduler_timer_pumps=%" PRIu64
+            " edge_decision_count=%" PRIu64
+            " edge_decision_seen=%s"
+            " tick_block_count=%" PRIu64
+            " virtual_now=%" PRId64
+            " virtual_deadline=%" PRId64
+            " virtual_has_timers=%s"
+            " virtual_expired=%s"
+            " serviceable=%s"
+            " cpu_known=%s"
+            " cpu_mode=%s"
+            " cpl=%" PRIu32
+            " eip=0x%08" PRIx64
+            " pc_candidate=%s"
+            " pc_idle=%s"
+            " pc_browser_first_read_predecessor=%s"
+            " pc_native_first_read_predecessor=%s"
+            " eflags=0x%08" PRIx64
+            " interrupts_enabled=%s"
+            " irq_inhibited=%s"
+            " cpu_interrupt_request=0x%08" PRIx32
+            " pending_interrupt=%s"
+            " cpu_exit_request=%s"
+            " watch_phys=0x%08" PRIx64
+            " watch_tick_unit=0x%08" PRIx32
+            " watch_value_read=%s"
+            " watch_value=0x%08" PRIx32
+            " watch_ticks=%" PRIu64
+            " wait_present=%s"
+            " stream_idle_transition_seen=%s"
+            " stream_idle=%s"
+            " wait_generation=%" PRIu64
+            " wait_source=%s"
+            " wait_op=%s"
+            " wait_seq=%" PRIu64 "\n",
+            xemu_xbe_boot_trace_context(), seq,
+            reason ? reason : "unknown",
+            xemu_xbe_bool_str(ready),
+            xemu_xbe_bool_str(mode_match),
+            xemu_xbe_bool_str(trace_enabled),
+            xemu_xbe_bool_str(entry_ready),
+            xemu_xbe_bool_str(loaded),
+            interval, tb_budget, pump_limit,
+            xemu_xbe_bool_str(pump_limit_exhausted),
+            xemu_xbe_bool_str(state->active),
+            xemu_xbe_bool_str(state->done),
+            state->timer_pump_count,
+            obs->exec_edge_decision_probe_count,
+            xemu_xbe_bool_str(obs->exec_edge_decision_probe_count > 0),
+            obs->exec_tick_block_probe_count,
+            virtual_now, virtual_deadline,
+            xemu_xbe_bool_str(virtual_has_timers),
+            xemu_xbe_bool_str(virtual_expired),
+            xemu_xbe_bool_str(serviceable),
+            xemu_xbe_bool_str(exec_ctx && exec_ctx->cpu_known),
+            exec_ctx ? exec_ctx->mode : "unknown",
+            exec_ctx ? exec_ctx->cpl : 0,
+            exec_ctx && exec_ctx->cpu_known ? exec_ctx->eip : 0,
+            xemu_xbe_bool_str(
+                xemu_xbe_pre_first_read_scheduler_pc_is_candidate(pc)),
+            xemu_xbe_bool_str(pc == XEMU_XBE_TCG_TIMER_PUMP_IDLE_LOOP_PC_2),
+            xemu_xbe_bool_str(pc ==
+                              XEMU_XBE_FIRST_READ_PREDECESSOR_PC_BROWSER),
+            xemu_xbe_bool_str(pc ==
+                              XEMU_XBE_FIRST_READ_PREDECESSOR_PC_NATIVE),
+            exec_ctx ? exec_ctx->computed_eflags : 0,
+            xemu_xbe_bool_str(exec_ctx &&
+                              (exec_ctx->computed_eflags & IF_MASK)),
+            xemu_xbe_bool_str(exec_ctx &&
+                              (exec_ctx->hflags & HF_INHIBIT_IRQ_MASK)),
+            exec_ctx ? exec_ctx->cpu_interrupt_request : 0,
+            xemu_xbe_bool_str(exec_ctx &&
+                              exec_ctx->cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(exec_ctx && exec_ctx->cpu_exit_request),
+            XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+            XEMU_XBE_TICK_BLOCK_TICK_UNIT,
+            xemu_xbe_bool_str(watch_value_read),
+            watch_value, watch_ticks,
+            xemu_xbe_bool_str(wait_state.present),
+            xemu_xbe_bool_str(xemu_xbe_pfifo_stream_idle_transition_observed()),
+            xemu_xbe_bool_str(xemu_xbe_nv2a_wait_is_stream_idle(&wait_state)),
+            wait_state.generation,
+            wait_state.present ? wait_state.state.source : "none",
+            wait_state.present ? wait_state.state.op : "none",
+            wait_state.present ? wait_state.state.seq : 0);
+}
+
+static bool xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_site_ready(
+    bool emit_gate)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+    struct xemu_xbe_exec_context exec_ctx;
+    int64_t interval = xemu_xbe_boot_trace_tcg_timer_pump_interval();
+    bool mode_match = xemu_xbe_tcg_timer_pump_mode_is_pre_first_read_scheduler(
+        xemu_xbe_tcg_timer_pump_mode());
+    bool trace_enabled = xemu_xbe_boot_trace_enabled();
+    bool entry_ready = xemu_xbe_boot_trace_entry_ready();
+    bool loaded = xemu_xbe_boot_trace_loaded();
+    int64_t tb_budget;
+    int64_t pump_limit;
+    int64_t virtual_now;
+    int64_t virtual_deadline;
+    bool pump_limit_exhausted;
+    bool virtual_has_timers;
+    bool virtual_expired;
+    bool serviceable;
+    const char *reason = "ready";
+    bool ready = false;
+
+    if (!mode_match || !trace_enabled || !entry_ready || interval <= 0) {
+        return false;
+    }
+
+    tb_budget = xemu_xbe_pre_first_read_scheduler_tb_budget();
+    pump_limit = xemu_xbe_tcg_timer_pump_after_idle_probe_limit();
+    virtual_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    pump_limit_exhausted =
+        pump_limit > 0 && state->timer_pump_count >= (uint64_t)pump_limit;
+    virtual_has_timers = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    serviceable = xemu_xbe_exec_context_is_pre_first_read_scheduler_serviceable(
+        &exec_ctx);
+
+    if (tb_budget == 0) {
+        reason = "tb-budget-zero";
+    } else if (pump_limit <= 0) {
+        reason = "pump-limit-disabled";
+    } else if (pump_limit_exhausted) {
+        reason = "pump-limit-exhausted";
+    } else if (!loaded) {
+        reason = "not-loaded";
+    } else if (state->done) {
+        reason = "scheduler-done";
+    } else if (obs->exec_edge_decision_probe_count > 0) {
+        reason = "edge-decision-already-seen";
+    } else if (!virtual_has_timers) {
+        reason = "no-virtual-timers";
+    } else if (!virtual_expired) {
+        reason = "no-expired-virtual-timer";
+    } else if (!serviceable) {
+        reason = "cpu-not-serviceable";
+    } else {
+        ready = true;
+    }
+
+    if (emit_gate) {
+        xemu_xbe_pre_first_read_scheduler_gate_emit(
+            reason, ready, mode_match, trace_enabled, entry_ready, loaded,
+            interval, tb_budget, pump_limit, pump_limit_exhausted,
+            virtual_has_timers, virtual_expired, virtual_now,
+            virtual_deadline, serviceable, &exec_ctx);
+    }
+
+    return ready;
+}
+
+static bool xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_ready(void)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+    struct xemu_xbe_exec_context exec_ctx;
+
+    if (!xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_site_ready(false)) {
+        return false;
+    }
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    if (!state->active) {
+        memset(state, 0, sizeof(*state));
+        state->active = true;
+        state->start_tick_block_count = obs->exec_tick_block_probe_count;
+        state->start_edge_decision_count =
+            obs->exec_edge_decision_probe_count;
+        state->start_skip_count = obs->exec_edge_decision_skip_count;
+        xemu_xbe_pre_first_read_scheduler_emit(
+            "start", "tcg-pre-interrupt", NULL, exec_ctx.eip, 0, 0);
+    }
+
+    return true;
+}
+
+static void xemu_xbe_pre_first_read_scheduler_note_timer_pump(bool progress)
+{
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+
+    if (!state->active || state->done) {
+        return;
+    }
+
+    state->timer_pump_count++;
+    if (progress) {
+        state->timer_delivery_count++;
+    }
+    xemu_xbe_pre_first_read_scheduler_emit(
+        "timer-pump", "tcg-pre-interrupt", NULL, 0, 0, 0);
+    xemu_xbe_pre_first_read_scheduler_maybe_stop(
+        "timer-pump-stop", "tcg-pre-interrupt", 0, 0, 0);
+}
+
+static void xemu_xbe_pre_first_read_scheduler_note_first_read(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    const char *source)
+{
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+
+    if (!state->active || state->done) {
+        return;
+    }
+
+    state->first_read_seen = true;
+    if (obs->exec_tick_block_probe_count <= state->start_tick_block_count) {
+        state->first_read_before_tick_block = true;
+    }
+    xemu_xbe_pre_first_read_scheduler_finish(
+        "first-read", source ? source : "edge-decision-pre",
+        state->first_read_before_tick_block ?
+            "first-read-before-tick-block" : "first-read-after-tick-block",
+        guest_pc, tb_size, 0);
+}
+
+static void xemu_xbe_pre_first_read_scheduler_note_tick_block(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    int tb_exit,
+    const char *source)
+{
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+
+    if (!state->active || state->done) {
+        return;
+    }
+
+    xemu_xbe_pre_first_read_scheduler_maybe_stop(
+        "tick-block", source ? source : "tick-block-post", guest_pc,
+        tb_size, tb_exit);
+}
+
+void xemu_xbe_boot_trace_pre_first_read_scheduler_after_tb(uint64_t guest_pc,
+                                                           uint32_t tb_size,
+                                                           int tb_exit,
+                                                           const char *source)
+{
+    struct xemu_xbe_pre_first_read_scheduler_state *state =
+        &xemu_xbe_pre_first_read_scheduler;
+
+    if (!state->active || state->done) {
+        return;
+    }
+
+    state->tb_count++;
+    xemu_xbe_pre_first_read_scheduler_maybe_stop(
+        "after-tb", source ? source : "tcg-after-tb", guest_pc, tb_size,
+        tb_exit);
+}
+
 static bool xemu_xbe_tcg_timer_pump_idle_loop_serviceable_after_idle_ready(void)
 {
     /*
@@ -1244,6 +2320,41 @@ static bool xemu_xbe_tcg_timer_pump_idle_loop_serviceable_after_pfifo_transition
     }
 
     return xemu_xbe_tcg_timer_pump_idle_loop_serviceable_ready();
+}
+
+static bool xemu_xbe_tcg_timer_pump_post_pfifo_pre_first_read_ready(void)
+{
+    static uint64_t delivery_attempts;
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_exec_context exec_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    int64_t limit = xemu_xbe_tcg_timer_pump_after_idle_probe_limit();
+
+    if (limit <= 0 || delivery_attempts >= (uint64_t)limit ||
+        !xemu_xbe_pfifo_stream_idle_transition_observed() ||
+        obs->exec_tick_block_probe_count > 0 ||
+        obs->exec_edge_decision_probe_count > 0) {
+        return false;
+    }
+
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    if (!xemu_xbe_nv2a_wait_snapshot_is_pfifo_empty(&wait_state)) {
+        return false;
+    }
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    if (!xemu_xbe_exec_context_is_post_pfifo_pre_first_read_serviceable(
+            &exec_ctx)) {
+        return false;
+    }
+
+    if (!qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL) ||
+        !qemu_clock_expired(QEMU_CLOCK_VIRTUAL)) {
+        return false;
+    }
+
+    delivery_attempts++;
+    return true;
 }
 
 static bool xemu_xbe_pc_is_tcg_timer_pump_before_pfifo_candidate(uint64_t pc)
@@ -1595,6 +2706,9 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_ready(void)
                        mode,
                        "pit-before-pfifo-transition-activity-defer-to-idle")) {
             /* This mode defers hard-IRQ service to the native idle PC. */
+        } else if (xemu_xbe_tcg_timer_pump_mode_is_pre_first_read_scheduler(
+                       mode)) {
+            /* This mode has its own pre-first-read CPU/timer gate. */
         } else if (g_ascii_strcasecmp(mode, "pit-after-pfifo-transition") ||
                    !xemu_xbe_pfifo_stream_idle_transition_observed()) {
             return false;
@@ -1615,6 +2729,11 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_ready(void)
         return xemu_xbe_tcg_timer_pump_idle_loop_serviceable_after_idle_full_ready();
     } else if (!g_ascii_strcasecmp(mode, "pit-after-pfifo-transition")) {
         return xemu_xbe_tcg_timer_pump_idle_loop_serviceable_after_pfifo_transition_ready();
+    } else if (!g_ascii_strcasecmp(mode, "pit-post-pfifo-pre-first-read")) {
+        return xemu_xbe_tcg_timer_pump_post_pfifo_pre_first_read_ready();
+    } else if (xemu_xbe_tcg_timer_pump_mode_is_pre_first_read_scheduler(
+                   mode)) {
+        return xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_ready();
     } else if (!g_ascii_strcasecmp(mode, "pit-before-pfifo-transition")) {
         return xemu_xbe_tcg_timer_pump_idle_loop_before_pfifo_transition_ready(
             &wait_state, false);
@@ -1649,6 +2768,23 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_before_tb(void)
         mode, "pit-before-pfifo-transition-activity-pre-tb-defer");
 }
 
+bool xemu_xbe_boot_trace_tcg_timer_pump_before_interrupt(void)
+{
+    /*
+     * Keep the old broad before-interrupt path quarantined. The only allowed
+     * owner here is the opt-in pre-first-read scheduler after its site-ready
+     * guard has proved the dashboard image is loaded, the CPU is at a bounded
+     * serviceable point, and an expired virtual timer is available.
+     */
+    return xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_ready();
+}
+
+bool xemu_xbe_boot_trace_tcg_timer_pump_after_tb(void)
+{
+    return !xemu_xbe_boot_trace_tcg_timer_pump_before_tb() &&
+           !xemu_xbe_tcg_timer_pump_pre_first_read_scheduler_site_ready(false);
+}
+
 bool xemu_xbe_boot_trace_tcg_timer_pump_pit_only(void)
 {
     const char *mode = xemu_xbe_tcg_timer_pump_mode();
@@ -1658,6 +2794,7 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_pit_only(void)
            !g_ascii_strcasecmp(mode,
                                "idle-loop-serviceable-pit-after-idle-full") ||
            !g_ascii_strcasecmp(mode, "pit-after-pfifo-transition") ||
+           !g_ascii_strcasecmp(mode, "pit-post-pfifo-pre-first-read") ||
            !g_ascii_strcasecmp(mode, "pit-before-pfifo-transition") ||
            !g_ascii_strcasecmp(mode, "pit-before-pfifo-transition-activity") ||
            !g_ascii_strcasecmp(mode,
@@ -1666,6 +2803,7 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_pit_only(void)
                mode, "pit-before-pfifo-transition-activity-pre-tb-defer") ||
            !g_ascii_strcasecmp(
                mode, "pit-before-pfifo-transition-activity-defer-to-idle") ||
+           xemu_xbe_tcg_timer_pump_mode_is_pre_first_read_scheduler(mode) ||
            xemu_xbe_tcg_timer_pump_mode_is_pfifo_pre_commit(mode);
 }
 
@@ -2388,6 +3526,19 @@ static bool xemu_xbe_read_phys_probe_bytes(hwaddr phys_addr, uint8_t *bytes,
                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
 }
 
+static bool xemu_xbe_read_phys_u32(hwaddr phys_addr, uint32_t *value)
+{
+    uint32_t tmp;
+
+    if (!xemu_xbe_read_phys_probe_bytes(phys_addr, (uint8_t *)&tmp,
+                                        sizeof(tmp))) {
+        return false;
+    }
+
+    *value = ldl_le_p(&tmp);
+    return true;
+}
+
 static uint64_t xemu_xbe_fnv1a64(const uint8_t *data, size_t len)
 {
     uint64_t hash = 1469598103934665603ULL;
@@ -3066,6 +4217,945 @@ static bool xemu_xbe_boot_trace_memory_watch_sample(uint64_t *phys_out,
     *phys_out = 0;
     *value_out = 0;
     return false;
+#endif
+}
+
+void xemu_xbe_boot_trace_tick_block_pre_tb(uint64_t guest_pc,
+                                           uint32_t tb_size,
+                                           const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_tick_block_snapshot *snapshot =
+        &xemu_xbe_tick_block_pending;
+    int64_t limit = xemu_xbe_tick_block_probe_limit();
+
+    if (!xemu_xbe_boot_trace_enabled() || limit == 0 ||
+        guest_pc != XEMU_XBE_TICK_BLOCK_PC ||
+        !obs->loaded_marked || obs->executed_marked || !obs->entry_marked ||
+        obs->exec_tick_block_probe_count >= (uint64_t)limit) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->valid = true;
+    snapshot->start_pc = guest_pc;
+    snapshot->tb_size = tb_size;
+    snapshot->source = source ? source : "tcg-tb-pre";
+    xemu_xbe_capture_exec_context(&snapshot->pre_ctx);
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&snapshot->pre_wait_state);
+    snapshot->pre_wait_state.state.source = snapshot->pre_wait_state.source;
+    snapshot->pre_wait_state.state.op = snapshot->pre_wait_state.op;
+
+    xemu_xbe_memory_watch_suppress = true;
+    snapshot->pre_watch_value_read =
+        xemu_xbe_read_phys_u32(XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+                               &snapshot->pre_watch_value);
+    xemu_xbe_memory_watch_suppress = false;
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)source;
+#endif
+}
+
+void xemu_xbe_boot_trace_tick_block_post_tb(uint64_t guest_pc,
+                                            uint32_t tb_size,
+                                            int tb_exit,
+                                            const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_tick_block_snapshot *snapshot =
+        &xemu_xbe_tick_block_pending;
+    struct xemu_xbe_exec_context post_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot post_wait_state;
+    uint64_t next_pc = 0;
+    bool next_pc_known;
+    bool expected_path;
+    bool stream_idle_transition_seen;
+    bool pre_stream_completion;
+    bool post_watch_value_read;
+    uint32_t post_watch_value = 0;
+    int64_t watch_delta = 0;
+    uint64_t pre_watch_ticks = 0;
+    uint64_t post_watch_ticks = 0;
+    int64_t watch_delta_ticks = 0;
+    uint64_t emitted_seq;
+    uint64_t pre_stream_seq;
+    int64_t limit = xemu_xbe_tick_block_probe_limit();
+
+    if (!snapshot->valid ||
+        snapshot->start_pc != guest_pc ||
+        snapshot->tb_size != tb_size) {
+        return;
+    }
+
+    snapshot->valid = false;
+    if (limit == 0 ||
+        obs->exec_tick_block_probe_count >= (uint64_t)limit) {
+        return;
+    }
+
+    next_pc_known = xemu_xbe_current_pc(&next_pc);
+    expected_path = next_pc_known && next_pc == XEMU_XBE_TICK_BLOCK_NEXT_PC;
+    if (!expected_path) {
+        return;
+    }
+
+    xemu_xbe_capture_exec_context(&post_ctx);
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&post_wait_state);
+    post_wait_state.state.source = post_wait_state.source;
+    post_wait_state.state.op = post_wait_state.op;
+
+    xemu_xbe_memory_watch_suppress = true;
+    post_watch_value_read =
+        xemu_xbe_read_phys_u32(XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+                               &post_watch_value);
+    xemu_xbe_memory_watch_suppress = false;
+
+    stream_idle_transition_seen = xemu_xbe_pfifo_stream_idle_transition_observed();
+    pre_stream_completion = !stream_idle_transition_seen;
+    emitted_seq = ++obs->exec_tick_block_probe_count;
+    if (pre_stream_completion) {
+        pre_stream_seq = ++obs->exec_tick_block_pre_stream_count;
+    } else {
+        pre_stream_seq = obs->exec_tick_block_pre_stream_count;
+    }
+
+    if (snapshot->pre_watch_value_read && post_watch_value_read) {
+        watch_delta = (int64_t)post_watch_value -
+                      (int64_t)snapshot->pre_watch_value;
+        watch_delta_ticks =
+            watch_delta / (int64_t)XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+    if (snapshot->pre_watch_value_read) {
+        pre_watch_ticks =
+            snapshot->pre_watch_value / XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+    if (post_watch_value_read) {
+        post_watch_ticks =
+            post_watch_value / XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b6 tick-block=complete context=%s"
+            " seq=%" PRIu64
+            " source=%s"
+            " pre_source=%s"
+            " start_pc=0x%08" PRIx64
+            " next_pc_known=%s"
+            " next_pc=0x%08" PRIx64
+            " expected_next=0x%08" PRIx64
+            " tb_size=%" PRIu32
+            " tb_exit=%d"
+            " limit=%" PRId64
+            " pre_stream_idle_completion=%s"
+            " pre_stream_idle_completions=%" PRIu64
+            " pre_stream_idle_seq=%" PRIu64
+            " stream_idle_transition_seen=%s"
+            " edge_decision_seen_before_completion=%s"
+            " edge_decision_count_before_completion=%" PRIu64
+            " watch_phys=0x%08" PRIx64
+            " watch_tick_unit=0x%08" PRIx32
+            " pre_watch_value_read=%s"
+            " pre_watch_value=0x%08" PRIx32
+            " pre_watch_ticks=%" PRIu64
+            " post_watch_value_read=%s"
+            " post_watch_value=0x%08" PRIx32
+            " post_watch_ticks=%" PRIu64
+            " watch_delta=%" PRId64
+            " watch_delta_ticks=%" PRId64
+            " pre_cpu_known=%s"
+            " pre_eip=0x%08" PRIx64
+            " pre_eflags=0x%08" PRIx64
+            " pre_interrupts_enabled=%s"
+            " pre_irq_inhibited=%s"
+            " pre_cpu_interrupt_request=0x%08" PRIx32
+            " pre_pending_interrupt=%s"
+            " post_cpu_known=%s"
+            " post_eip=0x%08" PRIx64
+            " post_eflags=0x%08" PRIx64
+            " post_interrupts_enabled=%s"
+            " post_irq_inhibited=%s"
+            " post_cpu_interrupt_request=0x%08" PRIx32
+            " post_pending_interrupt=%s"
+            " pre_wait_present=%s"
+            " pre_stream_idle=%s"
+            " pre_wait_generation=%" PRIu64
+            " pre_wait_source=%s"
+            " pre_wait_op=%s"
+            " pre_wait_seq=%" PRIu64
+            " pre_wait_dma_get=0x%08x"
+            " pre_wait_dma_put=0x%08x"
+            " pre_wait_pmc_pending=0x%08x"
+            " pre_wait_pfifo_known=%s"
+            " pre_wait_pfifo_pending=0x%08x"
+            " pre_wait_pcrtc_pending=0x%08x"
+            " pre_wait_pgraph_pending=0x%08x"
+            " post_wait_present=%s"
+            " post_stream_idle=%s"
+            " post_wait_generation=%" PRIu64
+            " post_wait_source=%s"
+            " post_wait_op=%s"
+            " post_wait_seq=%" PRIu64
+            " post_wait_dma_get=0x%08x"
+            " post_wait_dma_put=0x%08x"
+            " post_wait_pmc_pending=0x%08x"
+            " post_wait_pfifo_known=%s"
+            " post_wait_pfifo_pending=0x%08x"
+            " post_wait_pcrtc_pending=0x%08x"
+            " post_wait_pgraph_pending=0x%08x\n",
+            xemu_xbe_boot_trace_context(), emitted_seq,
+            source ? source : "tcg-tb-post",
+            snapshot->source ? snapshot->source : "tcg-tb-pre",
+            snapshot->start_pc,
+            xemu_xbe_bool_str(next_pc_known),
+            next_pc_known ? next_pc : 0,
+            XEMU_XBE_TICK_BLOCK_NEXT_PC,
+            tb_size, tb_exit, limit,
+            xemu_xbe_bool_str(pre_stream_completion),
+            obs->exec_tick_block_pre_stream_count, pre_stream_seq,
+            xemu_xbe_bool_str(stream_idle_transition_seen),
+            xemu_xbe_bool_str(obs->exec_edge_decision_probe_count > 0),
+            obs->exec_edge_decision_probe_count,
+            XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+            XEMU_XBE_TICK_BLOCK_TICK_UNIT,
+            xemu_xbe_bool_str(snapshot->pre_watch_value_read),
+            snapshot->pre_watch_value, pre_watch_ticks,
+            xemu_xbe_bool_str(post_watch_value_read),
+            post_watch_value, post_watch_ticks,
+            watch_delta, watch_delta_ticks,
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_known),
+            snapshot->pre_ctx.eip, snapshot->pre_ctx.computed_eflags,
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(snapshot->pre_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            snapshot->pre_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(post_ctx.cpu_known),
+            post_ctx.eip, post_ctx.computed_eflags,
+            xemu_xbe_bool_str(post_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(post_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            post_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(post_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(snapshot->pre_wait_state.present),
+            xemu_xbe_bool_str(
+                xemu_xbe_nv2a_wait_is_stream_idle(&snapshot->pre_wait_state)),
+            snapshot->pre_wait_state.generation,
+            snapshot->pre_wait_state.state.source ?
+                snapshot->pre_wait_state.state.source : "none",
+            snapshot->pre_wait_state.state.op ?
+                snapshot->pre_wait_state.state.op : "none",
+            snapshot->pre_wait_state.state.seq,
+            snapshot->pre_wait_state.state.dma_get,
+            snapshot->pre_wait_state.state.dma_put,
+            snapshot->pre_wait_state.state.pmc_pending,
+            xemu_xbe_bool_str(snapshot->pre_wait_state.state.pfifo_known),
+            snapshot->pre_wait_state.state.pfifo_pending,
+            snapshot->pre_wait_state.state.pcrtc_pending,
+            snapshot->pre_wait_state.state.pgraph_pending,
+            xemu_xbe_bool_str(post_wait_state.present),
+            xemu_xbe_bool_str(
+                xemu_xbe_nv2a_wait_is_stream_idle(&post_wait_state)),
+            post_wait_state.generation,
+            post_wait_state.state.source ?
+                post_wait_state.state.source : "none",
+            post_wait_state.state.op ?
+                post_wait_state.state.op : "none",
+            post_wait_state.state.seq,
+            post_wait_state.state.dma_get,
+            post_wait_state.state.dma_put,
+            post_wait_state.state.pmc_pending,
+            xemu_xbe_bool_str(post_wait_state.state.pfifo_known),
+            post_wait_state.state.pfifo_pending,
+            post_wait_state.state.pcrtc_pending,
+            post_wait_state.state.pgraph_pending);
+    xemu_xbe_pre_first_read_scheduler_note_tick_block(
+        guest_pc, tb_size, tb_exit, source ? source : "tcg-tb-post");
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)tb_exit;
+    (void)source;
+#endif
+}
+
+bool xemu_xbe_boot_trace_tick_block_irq_defer_pre_tb(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    uint32_t interrupt_request,
+    bool cpu_exit_request,
+    uint32_t hard_irq_mask,
+    uint32_t defer_mask,
+    const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_exec_context exec_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    bool active = false;
+    bool watch_value_read = false;
+    bool sample_mismatch;
+    uint32_t watch_value = 0;
+    uint32_t effective_interrupt_request;
+    bool effective_exit_request;
+    uint64_t watch_ticks = 0;
+    uint64_t seq;
+    int64_t limit;
+    const char *reason = "defer-one-tick-block";
+
+    if (!xemu_xbe_boot_trace_enabled() ||
+        !xemu_xbe_tick_block_irq_defer_enabled() ||
+        guest_pc != XEMU_XBE_TICK_BLOCK_PC) {
+        return false;
+    }
+
+    limit = xemu_xbe_tick_block_irq_defer_probe_limit();
+    if (limit == 0 ||
+        obs->exec_tick_block_irq_defer_probe_count >= (uint64_t)limit) {
+        return false;
+    }
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    effective_interrupt_request = interrupt_request;
+    effective_exit_request = cpu_exit_request;
+    if (exec_ctx.cpu_known) {
+        effective_interrupt_request = exec_ctx.cpu_interrupt_request;
+        effective_exit_request = exec_ctx.cpu_exit_request;
+    }
+    sample_mismatch = effective_interrupt_request != interrupt_request ||
+                      effective_exit_request != cpu_exit_request;
+
+    /*
+     * This exact-PC IRQ defer was a diagnostic-only experiment. It proved too
+     * sensitive to whether timer delivery lands at the return predecessor or
+     * at the tick block itself, so keep the marker but disable the behavior.
+     */
+    reason = "quarantined";
+
+    seq = ++obs->exec_tick_block_irq_defer_probe_count;
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    wait_state.state.source = wait_state.source;
+    wait_state.state.op = wait_state.op;
+
+    xemu_xbe_memory_watch_suppress = true;
+    watch_value_read =
+        xemu_xbe_read_phys_u32(XEMU_XBE_TICK_BLOCK_WATCH_PHYS, &watch_value);
+    xemu_xbe_memory_watch_suppress = false;
+    if (watch_value_read) {
+        watch_ticks = watch_value / XEMU_XBE_TICK_BLOCK_TICK_UNIT;
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b6 tick-block-irq-defer context=%s"
+            " phase=pre"
+            " seq=%" PRIu64
+            " source=%s"
+            " action=%s"
+            " reason=%s"
+            " start_pc=0x%08" PRIx64
+            " tb_size=%" PRIu32
+            " hard_irq_mask=0x%08" PRIx32
+            " defer_mask=0x%08" PRIx32
+            " interrupt_request=0x%08" PRIx32
+            " cpu_exit_request=%s"
+            " effective_interrupt_request=0x%08" PRIx32
+            " effective_exit_request=%s"
+            " sample_mismatch=%s"
+            " loaded=%s"
+            " entry_ready=%s"
+            " executed=%s"
+            " tick_block_completions=%" PRIu64
+            " tick_block_pre_stream_completions=%" PRIu64
+            " edge_decision_count=%" PRIu64
+            " edge_decision_skip_count=%" PRIu64
+            " limit=%" PRId64
+            " watch_phys=0x%08" PRIx64
+            " watch_value_read=%s"
+            " watch_value=0x%08" PRIx32
+            " watch_ticks=%" PRIu64
+            " cpu_known=%s"
+            " eip=0x%08" PRIx64
+            " eflags=0x%08" PRIx64
+            " interrupts_enabled=%s"
+            " irq_inhibited=%s"
+            " ctx_interrupt_request=0x%08" PRIx32
+            " ctx_exit_request=%s"
+            " wait_present=%s"
+            " stream_idle=%s"
+            " wait_generation=%" PRIu64
+            " wait_source=%s"
+            " wait_op=%s"
+            " wait_seq=%" PRIu64
+            " wait_dma_get=0x%08x"
+            " wait_dma_put=0x%08x"
+            " wait_pmc_pending=0x%08x"
+            " wait_pfifo_known=%s"
+            " wait_pfifo_pending=0x%08x"
+            " wait_pcrtc_pending=0x%08x"
+            " wait_pgraph_pending=0x%08x\n",
+            xemu_xbe_boot_trace_context(),
+            seq,
+            source ? source : "tcg-tb-pre",
+            active ? "defer" : "skip",
+            reason,
+            guest_pc,
+            tb_size,
+            hard_irq_mask,
+            defer_mask,
+            interrupt_request,
+            xemu_xbe_bool_str(cpu_exit_request),
+            effective_interrupt_request,
+            xemu_xbe_bool_str(effective_exit_request),
+            xemu_xbe_bool_str(sample_mismatch),
+            xemu_xbe_bool_str(obs->loaded_marked),
+            xemu_xbe_bool_str(obs->entry_marked),
+            xemu_xbe_bool_str(obs->executed_marked),
+            obs->exec_tick_block_probe_count,
+            obs->exec_tick_block_pre_stream_count,
+            obs->exec_edge_decision_probe_count,
+            obs->exec_edge_decision_skip_count,
+            limit,
+            XEMU_XBE_TICK_BLOCK_WATCH_PHYS,
+            xemu_xbe_bool_str(watch_value_read),
+            watch_value,
+            watch_ticks,
+            xemu_xbe_bool_str(exec_ctx.cpu_known),
+            exec_ctx.eip,
+            exec_ctx.computed_eflags,
+            xemu_xbe_bool_str(exec_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(exec_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            exec_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(exec_ctx.cpu_exit_request),
+            xemu_xbe_bool_str(wait_state.present),
+            xemu_xbe_bool_str(xemu_xbe_nv2a_wait_is_stream_idle(&wait_state)),
+            wait_state.generation,
+            wait_state.state.source ? wait_state.state.source : "none",
+            wait_state.state.op ? wait_state.state.op : "none",
+            wait_state.state.seq,
+            wait_state.state.dma_get,
+            wait_state.state.dma_put,
+            wait_state.state.pmc_pending,
+            xemu_xbe_bool_str(wait_state.state.pfifo_known),
+            wait_state.state.pfifo_pending,
+            wait_state.state.pcrtc_pending,
+            wait_state.state.pgraph_pending);
+
+    return active;
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)interrupt_request;
+    (void)cpu_exit_request;
+    (void)hard_irq_mask;
+    (void)defer_mask;
+    (void)source;
+    return false;
+#endif
+}
+
+void xemu_xbe_boot_trace_tick_block_irq_defer_post_tb(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    int tb_exit,
+    uint32_t saved_interrupt_request,
+    bool saved_exit_request,
+    uint16_t saved_icount_decr_high,
+    uint32_t post_interrupt_request,
+    bool post_exit_request,
+    uint16_t post_icount_decr_high,
+    uint32_t restored_interrupt_request,
+    bool restored_exit_request,
+    uint16_t restored_icount_decr_high,
+    const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_exec_context exec_ctx;
+    uint64_t next_pc = 0;
+    bool next_pc_known;
+    bool expected_path;
+
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    next_pc_known = xemu_xbe_current_pc(&next_pc);
+    expected_path = next_pc_known && next_pc == XEMU_XBE_TICK_BLOCK_NEXT_PC;
+
+    fprintf(stderr,
+            "BOOT_MARK b6 tick-block-irq-defer context=%s"
+            " phase=post"
+            " seq=%" PRIu64
+            " source=%s"
+            " start_pc=0x%08" PRIx64
+            " next_pc_known=%s"
+            " next_pc=0x%08" PRIx64
+            " expected_next=0x%08" PRIx64
+            " expected_path=%s"
+            " tb_size=%" PRIu32
+            " tb_exit=%d"
+            " saved_interrupt_request=0x%08" PRIx32
+            " saved_exit_request=%s"
+            " saved_icount_decr_high=0x%04" PRIx16
+            " post_interrupt_request=0x%08" PRIx32
+            " post_exit_request=%s"
+            " post_icount_decr_high=0x%04" PRIx16
+            " restored_interrupt_request=0x%08" PRIx32
+            " restored_exit_request=%s"
+            " restored_icount_decr_high=0x%04" PRIx16
+            " tick_block_completions=%" PRIu64
+            " tick_block_pre_stream_completions=%" PRIu64
+            " edge_decision_count=%" PRIu64
+            " edge_decision_skip_count=%" PRIu64
+            " cpu_known=%s"
+            " eip=0x%08" PRIx64
+            " eflags=0x%08" PRIx64
+            " interrupts_enabled=%s"
+            " irq_inhibited=%s"
+            " ctx_interrupt_request=0x%08" PRIx32
+            " ctx_exit_request=%s\n",
+            xemu_xbe_boot_trace_context(),
+            obs->exec_tick_block_irq_defer_probe_count,
+            source ? source : "tcg-tb-post",
+            guest_pc,
+            xemu_xbe_bool_str(next_pc_known),
+            next_pc_known ? next_pc : 0,
+            XEMU_XBE_TICK_BLOCK_NEXT_PC,
+            xemu_xbe_bool_str(expected_path),
+            tb_size,
+            tb_exit,
+            saved_interrupt_request,
+            xemu_xbe_bool_str(saved_exit_request),
+            saved_icount_decr_high,
+            post_interrupt_request,
+            xemu_xbe_bool_str(post_exit_request),
+            post_icount_decr_high,
+            restored_interrupt_request,
+            xemu_xbe_bool_str(restored_exit_request),
+            restored_icount_decr_high,
+            obs->exec_tick_block_probe_count,
+            obs->exec_tick_block_pre_stream_count,
+            obs->exec_edge_decision_probe_count,
+            obs->exec_edge_decision_skip_count,
+            xemu_xbe_bool_str(exec_ctx.cpu_known),
+            exec_ctx.eip,
+            exec_ctx.computed_eflags,
+            xemu_xbe_bool_str(exec_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(exec_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            exec_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(exec_ctx.cpu_exit_request));
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)tb_exit;
+    (void)saved_interrupt_request;
+    (void)saved_exit_request;
+    (void)saved_icount_decr_high;
+    (void)post_interrupt_request;
+    (void)post_exit_request;
+    (void)post_icount_decr_high;
+    (void)restored_interrupt_request;
+    (void)restored_exit_request;
+    (void)restored_icount_decr_high;
+    (void)source;
+#endif
+}
+
+void xemu_xbe_boot_trace_edge_decision_pre_tb(uint64_t guest_pc,
+                                              uint32_t tb_size,
+                                              const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_loaded_observation *obs = &xemu_xbe_loaded_observation;
+    struct xemu_xbe_edge_decision_snapshot *snapshot =
+        &xemu_xbe_edge_decision_pending;
+    struct xemu_xbe_nv2a_wait_snapshot last_pfifo_idle;
+    int64_t limit = xemu_xbe_edge_decision_limit();
+    hwaddr cmp_phys = 0;
+
+    if (!xemu_xbe_boot_trace_enabled() || limit == 0 ||
+        guest_pc != XEMU_XBE_EDGE_DECISION_PC) {
+        return;
+    }
+
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&snapshot->wait_state);
+    snapshot->wait_state.state.source = snapshot->wait_state.source;
+    snapshot->wait_state.state.op = snapshot->wait_state.op;
+
+    if (!obs->loaded_marked || obs->executed_marked || !obs->entry_marked ||
+        obs->exec_edge_decision_probe_count >= (uint64_t)limit ||
+        !xemu_xbe_nv2a_wait_is_stream_idle(&snapshot->wait_state)) {
+        const char *reason;
+
+        if (!obs->loaded_marked) {
+            reason = "not-loaded";
+        } else if (!obs->entry_marked) {
+            reason = "entry-not-ready";
+        } else if (obs->executed_marked) {
+            reason = "already-executed";
+        } else if (obs->exec_edge_decision_probe_count >= (uint64_t)limit) {
+            reason = "probe-limit";
+        } else {
+            reason = "stream-idle-gate-false";
+        }
+
+        if (obs->exec_edge_decision_skip_count < (uint64_t)limit) {
+            xemu_xbe_boot_trace_latest_pfifo_stream_idle_state(
+                &last_pfifo_idle);
+            obs->exec_edge_decision_skip_count++;
+            fprintf(stderr,
+                    "BOOT_MARK b6 edge-decision-skip context=%s"
+                    " seq=%" PRIu64
+                    " source=%s"
+                    " reason=%s"
+                    " guest_pc=0x%08" PRIx64
+                    " target_pc=0x%08" PRIx64
+                    " tb_size=%" PRIu32
+                    " loaded=%s"
+                    " entry_ready=%s"
+                    " executed=%s"
+                    " probe_count=%" PRIu64
+                    " skip_count=%" PRIu64
+                    " limit=%" PRId64
+                    " wait_present=%s"
+                    " stream_idle=%s"
+                    " wait_generation=%" PRIu64
+                    " wait_source=%s"
+                    " wait_op=%s"
+                    " wait_seq=%" PRIu64
+                    " wait_dma_get=0x%08x"
+                    " wait_dma_put=0x%08x"
+                    " wait_pmc_pending=0x%08x"
+                    " wait_pfifo_known=%s"
+                    " wait_pfifo_pending=0x%08x"
+                    " wait_pcrtc_pending=0x%08x"
+                    " wait_pgraph_pending=0x%08x"
+                    " last_pfifo_idle_present=%s"
+                    " last_pfifo_idle_stream_idle=%s"
+                    " last_pfifo_idle_generation=%" PRIu64
+                    " last_pfifo_idle_source=%s"
+                    " last_pfifo_idle_op=%s"
+                    " last_pfifo_idle_seq=%" PRIu64
+                    " last_pfifo_idle_dma_get=0x%08x"
+                    " last_pfifo_idle_dma_put=0x%08x"
+                    " last_pfifo_idle_pmc_pending=0x%08x"
+                    " last_pfifo_idle_pfifo_known=%s"
+                    " last_pfifo_idle_pfifo_pending=0x%08x"
+                    " last_pfifo_idle_pcrtc_pending=0x%08x"
+                    " last_pfifo_idle_pgraph_pending=0x%08x"
+                    "\n",
+                    xemu_xbe_boot_trace_context(),
+                    obs->exec_edge_decision_skip_count,
+                    source ? source : "tcg-tb-pre",
+                    reason,
+                    guest_pc,
+                    XEMU_XBE_EDGE_DECISION_PC,
+                    tb_size,
+                    xemu_xbe_bool_str(obs->loaded_marked),
+                    xemu_xbe_bool_str(obs->entry_marked),
+                    xemu_xbe_bool_str(obs->executed_marked),
+                    obs->exec_edge_decision_probe_count,
+                    obs->exec_edge_decision_skip_count,
+                    limit,
+                    xemu_xbe_bool_str(snapshot->wait_state.present),
+                    xemu_xbe_bool_str(
+                        xemu_xbe_nv2a_wait_is_stream_idle(&snapshot->wait_state)),
+                    snapshot->wait_state.generation,
+                    snapshot->wait_state.state.source ?
+                        snapshot->wait_state.state.source : "none",
+                    snapshot->wait_state.state.op ?
+                        snapshot->wait_state.state.op : "none",
+                    snapshot->wait_state.state.seq,
+                    snapshot->wait_state.state.dma_get,
+                    snapshot->wait_state.state.dma_put,
+                    snapshot->wait_state.state.pmc_pending,
+                    xemu_xbe_bool_str(snapshot->wait_state.state.pfifo_known),
+                    snapshot->wait_state.state.pfifo_pending,
+                    snapshot->wait_state.state.pcrtc_pending,
+                    snapshot->wait_state.state.pgraph_pending,
+                    xemu_xbe_bool_str(last_pfifo_idle.present),
+                    xemu_xbe_bool_str(
+                        xemu_xbe_nv2a_wait_is_stream_idle(&last_pfifo_idle)),
+                    last_pfifo_idle.generation,
+                    last_pfifo_idle.state.source ?
+                        last_pfifo_idle.state.source : "none",
+                    last_pfifo_idle.state.op ?
+                        last_pfifo_idle.state.op : "none",
+                    last_pfifo_idle.state.seq,
+                    last_pfifo_idle.state.dma_get,
+                    last_pfifo_idle.state.dma_put,
+                    last_pfifo_idle.state.pmc_pending,
+                    xemu_xbe_bool_str(last_pfifo_idle.state.pfifo_known),
+                    last_pfifo_idle.state.pfifo_pending,
+                    last_pfifo_idle.state.pcrtc_pending,
+                    last_pfifo_idle.state.pgraph_pending);
+        }
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&snapshot->wait_state);
+    snapshot->wait_state.state.source = snapshot->wait_state.source;
+    snapshot->wait_state.state.op = snapshot->wait_state.op;
+    xemu_xbe_capture_exec_context(&snapshot->pre_ctx);
+    xemu_xbe_capture_code_probe(guest_pc, &snapshot->pre_ctx,
+                                &snapshot->start_code_probe);
+
+    xemu_xbe_memory_watch_suppress = true;
+    snapshot->watch_value_read =
+        xemu_xbe_read_phys_u32(0x0003a890, &snapshot->watch_value);
+    snapshot->cmp_mapping_known =
+        virt_to_phys((vaddr)(uint32_t)XEMU_XBE_EDGE_DECISION_CMP_ADDR,
+                     &cmp_phys) == 0;
+    snapshot->cmp_phys = snapshot->cmp_mapping_known ? cmp_phys : 0;
+    snapshot->cmp_value_read =
+        xemu_xbe_read_u32((vaddr)(uint32_t)XEMU_XBE_EDGE_DECISION_CMP_ADDR,
+                          &snapshot->cmp_value);
+    xemu_xbe_memory_watch_suppress = false;
+
+    snapshot->valid = true;
+    snapshot->seq = ++obs->exec_edge_decision_probe_count;
+    snapshot->start_pc = guest_pc;
+    snapshot->tb_size = tb_size;
+    snapshot->source = source ? source : "tcg-tb-pre";
+    xemu_xbe_pre_first_read_scheduler_note_first_read(
+        guest_pc, tb_size, source ? source : "tcg-tb-pre");
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)source;
+#endif
+}
+
+void xemu_xbe_boot_trace_edge_decision_post_tb(uint64_t guest_pc,
+                                               uint32_t tb_size,
+                                               int tb_exit,
+                                               const char *source)
+{
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    struct xemu_xbe_edge_decision_snapshot *snapshot =
+        &xemu_xbe_edge_decision_pending;
+    struct xemu_xbe_exec_context post_ctx;
+    struct xemu_xbe_code_probe next_code_probe;
+    uint64_t next_pc = 0;
+    bool next_pc_known;
+
+    if (!snapshot->valid ||
+        snapshot->start_pc != guest_pc ||
+        snapshot->tb_size != tb_size) {
+        return;
+    }
+
+    snapshot->valid = false;
+    next_pc_known = xemu_xbe_current_pc(&next_pc);
+    xemu_xbe_capture_exec_context(&post_ctx);
+    if (next_pc_known) {
+        xemu_xbe_capture_code_probe(next_pc, &post_ctx, &next_code_probe);
+    } else {
+        memset(&next_code_probe, 0, sizeof(next_code_probe));
+        next_code_probe.branch.kind = "none";
+        next_code_probe.mem_kind = "none";
+        next_code_probe.mem_region = "none";
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b6 edge-decision context=%s"
+            " seq=%" PRIu64
+            " source=%s"
+            " pre_source=%s"
+            " start_pc=0x%08" PRIx64
+            " next_pc_known=%s"
+            " next_pc=0x%08" PRIx64
+            " tb_size=%" PRIu32
+            " tb_exit=%d"
+            " expected_next=0x%08" PRIx64
+            " fallthrough_match=%s"
+            " pre_cpu_known=%s"
+            " pre_cpu_mode=%s"
+            " pre_cpl=%" PRIu32
+            " pre_eip=0x%08" PRIx64
+            " pre_eax=0x%08" PRIx64
+            " pre_ebx=0x%08" PRIx64
+            " pre_ecx=0x%08" PRIx64
+            " pre_edx=0x%08" PRIx64
+            " pre_esp=0x%08" PRIx64
+            " pre_ebp=0x%08" PRIx64
+            " pre_esi=0x%08" PRIx64
+            " pre_edi=0x%08" PRIx64
+            " pre_eflags_raw=0x%08" PRIx64
+            " pre_eflags=0x%08" PRIx64
+            " pre_interrupts_enabled=%s"
+            " pre_flag_zf=%s"
+            " pre_flag_cf=%s"
+            " pre_flag_sf=%s"
+            " pre_flag_of=%s"
+            " pre_hflags=0x%08" PRIx64
+            " pre_irq_inhibited=%s"
+            " pre_cpu_interrupt_request=0x%08" PRIx32
+            " pre_pending_interrupt=%s"
+            " pre_cpu_halted=%s"
+            " pre_cpu_exit_request=%s"
+            " pre_watch_phys=0x0003a890"
+            " pre_watch_value_read=%s"
+            " pre_watch_value=0x%08" PRIx32
+            " pre_cmp_addr=0x%08" PRIx64
+            " pre_cmp_phys_mapped=%s"
+            " pre_cmp_phys=0x%08" PRIx64
+            " pre_cmp_value_read=%s"
+            " pre_cmp_value=0x%08" PRIx32
+            " pre_wait_present=%s"
+            " pre_stream_idle=%s"
+            " pre_wait_generation=%" PRIu64
+            " pre_wait_source=%s"
+            " pre_wait_op=%s"
+            " pre_wait_seq=%" PRIu64
+            " pre_wait_dma_get=0x%08x"
+            " pre_wait_dma_put=0x%08x"
+            " pre_wait_pmc_pending=0x%08x"
+            " pre_wait_pmc_enabled=0x%08x"
+            " pre_wait_pfifo_known=%s"
+            " pre_wait_pfifo_pending=0x%08x"
+            " pre_wait_pfifo_enabled=0x%08x"
+            " pre_wait_pcrtc_pending=0x%08x"
+            " pre_wait_pcrtc_enabled=0x%08x"
+            " pre_wait_pgraph_pending=0x%08x"
+            " pre_wait_pgraph_enabled=0x%08x"
+            " start_code_read=%s"
+            " start_code_hash=0x%016" PRIx64
+            " start_opcode=0x%02" PRIx8
+            " start_modrm_known=%s"
+            " start_modrm=0x%02" PRIx8
+            " start_mem_kind=%s"
+            " start_mem_addr_known=%s"
+            " start_mem_addr=0x%08" PRIx64
+            " start_mem_phys_mapped=%s"
+            " start_mem_phys=0x%08" PRIx64
+            " start_mem_value_read=%s"
+            " start_mem_value=0x%08" PRIx32
+            " post_cpu_known=%s"
+            " post_eip=0x%08" PRIx64
+            " post_eflags=0x%08" PRIx64
+            " post_interrupts_enabled=%s"
+            " post_cpu_interrupt_request=0x%08" PRIx32
+            " post_pending_interrupt=%s"
+            " next_code_read=%s"
+            " next_code_hash=0x%016" PRIx64
+            " next_opcode=0x%02" PRIx8
+            " next_modrm_known=%s"
+            " next_modrm=0x%02" PRIx8
+            " next_branch_kind=%s"
+            " next_branch_target_known=%s"
+            " next_branch_target=0x%08" PRIx64
+            " next_mem_kind=%s"
+            " next_mem_addr_known=%s"
+            " next_mem_addr=0x%08" PRIx64
+            " next_mem_phys_mapped=%s"
+            " next_mem_phys=0x%08" PRIx64
+            " next_mem_value_read=%s"
+            " next_mem_value=0x%08" PRIx32
+            "\n",
+            xemu_xbe_boot_trace_context(),
+            snapshot->seq,
+            source ? source : "tcg-tb-post",
+            snapshot->source ? snapshot->source : "tcg-tb-pre",
+            snapshot->start_pc,
+            xemu_xbe_bool_str(next_pc_known),
+            next_pc_known ? next_pc : 0,
+            snapshot->tb_size,
+            tb_exit,
+            snapshot->start_pc + snapshot->tb_size,
+            xemu_xbe_bool_str(next_pc_known &&
+                              next_pc == snapshot->start_pc +
+                                         snapshot->tb_size),
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_known),
+            snapshot->pre_ctx.mode,
+            snapshot->pre_ctx.cpl,
+            snapshot->pre_ctx.eip,
+            snapshot->pre_ctx.eax,
+            snapshot->pre_ctx.ebx,
+            snapshot->pre_ctx.ecx,
+            snapshot->pre_ctx.edx,
+            snapshot->pre_ctx.esp,
+            snapshot->pre_ctx.ebp,
+            snapshot->pre_ctx.esi,
+            snapshot->pre_ctx.edi,
+            snapshot->pre_ctx.eflags,
+            snapshot->pre_ctx.computed_eflags,
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & CC_Z),
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & CC_C),
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & CC_S),
+            xemu_xbe_bool_str(snapshot->pre_ctx.computed_eflags & CC_O),
+            snapshot->pre_ctx.hflags,
+            xemu_xbe_bool_str(snapshot->pre_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            snapshot->pre_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_halted),
+            xemu_xbe_bool_str(snapshot->pre_ctx.cpu_exit_request),
+            xemu_xbe_bool_str(snapshot->watch_value_read),
+            snapshot->watch_value,
+            XEMU_XBE_EDGE_DECISION_CMP_ADDR,
+            xemu_xbe_bool_str(snapshot->cmp_mapping_known),
+            snapshot->cmp_phys,
+            xemu_xbe_bool_str(snapshot->cmp_value_read),
+            snapshot->cmp_value,
+            xemu_xbe_bool_str(snapshot->wait_state.present),
+            xemu_xbe_bool_str(
+                xemu_xbe_nv2a_wait_is_stream_idle(&snapshot->wait_state)),
+            snapshot->wait_state.generation,
+            snapshot->wait_state.state.source ?
+                snapshot->wait_state.state.source : "none",
+            snapshot->wait_state.state.op ?
+                snapshot->wait_state.state.op : "none",
+            snapshot->wait_state.state.seq,
+            snapshot->wait_state.state.dma_get,
+            snapshot->wait_state.state.dma_put,
+            snapshot->wait_state.state.pmc_pending,
+            snapshot->wait_state.state.pmc_enabled,
+            xemu_xbe_bool_str(snapshot->wait_state.state.pfifo_known),
+            snapshot->wait_state.state.pfifo_pending,
+            snapshot->wait_state.state.pfifo_enabled,
+            snapshot->wait_state.state.pcrtc_pending,
+            snapshot->wait_state.state.pcrtc_enabled,
+            snapshot->wait_state.state.pgraph_pending,
+            snapshot->wait_state.state.pgraph_enabled,
+            xemu_xbe_bool_str(snapshot->start_code_probe.read_ok),
+            snapshot->start_code_probe.hash,
+            snapshot->start_code_probe.opcode,
+            xemu_xbe_bool_str(snapshot->start_code_probe.modrm_known),
+            snapshot->start_code_probe.modrm,
+            snapshot->start_code_probe.mem_kind,
+            xemu_xbe_bool_str(snapshot->start_code_probe.mem_addr_known),
+            snapshot->start_code_probe.mem_addr,
+            xemu_xbe_bool_str(snapshot->start_code_probe.mem_mapping.mapped),
+            snapshot->start_code_probe.mem_mapping.phys_addr,
+            xemu_xbe_bool_str(snapshot->start_code_probe.mem_value_read),
+            snapshot->start_code_probe.mem_value,
+            xemu_xbe_bool_str(post_ctx.cpu_known),
+            post_ctx.eip,
+            post_ctx.computed_eflags,
+            xemu_xbe_bool_str(post_ctx.computed_eflags & IF_MASK),
+            post_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(post_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(next_code_probe.read_ok),
+            next_code_probe.hash,
+            next_code_probe.opcode,
+            xemu_xbe_bool_str(next_code_probe.modrm_known),
+            next_code_probe.modrm,
+            next_code_probe.branch.kind ?
+                next_code_probe.branch.kind : "none",
+            xemu_xbe_bool_str(next_code_probe.branch.target_known),
+            next_code_probe.branch.target,
+            next_code_probe.mem_kind ? next_code_probe.mem_kind : "none",
+            xemu_xbe_bool_str(next_code_probe.mem_addr_known),
+            next_code_probe.mem_addr,
+            xemu_xbe_bool_str(next_code_probe.mem_mapping.mapped),
+            next_code_probe.mem_mapping.phys_addr,
+            xemu_xbe_bool_str(next_code_probe.mem_value_read),
+            next_code_probe.mem_value);
+#else
+    (void)guest_pc;
+    (void)tb_size;
+    (void)tb_exit;
+    (void)source;
 #endif
 }
 
@@ -4980,6 +7070,165 @@ void xemu_xbe_boot_trace_observe_main_loop_timers(
             wait_state.present ? wait_state.state.pgraph_enabled : 0);
 }
 
+void xemu_xbe_boot_trace_observe_browser_timer_opportunity(
+    const char *source,
+    bool ready,
+    uint64_t progress_events,
+    int64_t progress_limit,
+    int64_t virtual_now,
+    int64_t virtual_deadline,
+    bool virtual_has_timers,
+    bool virtual_expired)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static uint64_t seq;
+    int64_t limit;
+    int64_t virtual_deadline_delta = -1;
+    struct xemu_xbe_exec_context exec_ctx;
+    struct xemu_xbe_nv2a_wait_snapshot wait_state;
+    uint32_t wait_dma_to_put = 0;
+    bool wait_dma_to_put_known;
+    uint64_t memory_watch_phys;
+    uint32_t memory_watch_value;
+    bool memory_watch_value_read;
+    bool entry_ready;
+    const char *reason;
+    const char *pfifo_empty_blocker;
+
+    if (!xemu_xbe_boot_trace_enabled()) {
+        return;
+    }
+
+    entry_ready = xemu_xbe_boot_trace_entry_ready();
+    limit = xemu_xbe_timer_opportunity_probe_limit();
+    if (!entry_ready || limit <= 0 || seq >= (uint64_t)limit) {
+        return;
+    }
+
+    xemu_xbe_boot_trace_latest_nv2a_wait_state(&wait_state);
+    xemu_xbe_capture_exec_context(&exec_ctx);
+    wait_dma_to_put_known =
+        xemu_xbe_wait_state_dma_to_put(&wait_state, &wait_dma_to_put);
+    memory_watch_value_read = xemu_xbe_boot_trace_memory_watch_sample(
+        &memory_watch_phys, &memory_watch_value);
+
+    reason = ready ? "ready" :
+        xemu_xbe_main_loop_timer_pump_block_reason(&wait_state);
+    if (!reason) {
+        reason = "ready-recompute-mismatch";
+    }
+    pfifo_empty_blocker =
+        xemu_xbe_nv2a_wait_pfifo_empty_blocker(&wait_state);
+    if (virtual_deadline >= 0) {
+        virtual_deadline_delta = virtual_deadline - virtual_now;
+    }
+
+    seq++;
+    fprintf(stderr,
+            "BOOT_MARK b6 headless=timer-opportunity context=%s"
+            " seq=%" PRIu64
+            " source=%s"
+            " ready=%s"
+            " reason=%s"
+            " entry_ready=%s"
+            " transition_seen=%s"
+            " progress_events=%" PRIu64
+            " progress_limit=%" PRId64
+            " virtual_now=%" PRId64
+            " virtual_deadline=%" PRId64
+            " virtual_deadline_delta=%" PRId64
+            " virtual_has_timers=%s"
+            " virtual_expired=%s"
+            " cpu_known=%s"
+            " cpu_mode=%s"
+            " cpl=%" PRIu32
+            " eip=0x%08" PRIx64
+            " cs=0x%04" PRIx32
+            " esp=0x%08" PRIx64
+            " eflags=0x%08" PRIx64
+            " interrupts_enabled=%s"
+            " irq_inhibited=%s"
+            " cpu_interrupt_request=0x%08" PRIx32
+            " pending_interrupt=%s"
+            " cpu_exit_request=%s"
+            " memory_watch_phys=0x%08" PRIx64
+            " memory_watch_value_read=%s"
+            " memory_watch_value=0x%08" PRIx32
+            " stream_idle=%s"
+            " wait_present=%s"
+            " wait_generation=%" PRIu64
+            " wait_source=%s"
+            " wait_op=%s"
+            " pfifo_empty_blocker=%s"
+            " wait_seq=%" PRIu64
+            " wait_dma_get=0x%08" PRIx32
+            " wait_dma_put=0x%08" PRIx32
+            " wait_dma_to_put_known=%s"
+            " wait_dma_to_put=%" PRIu32
+            " wait_pfifo_known=%s"
+            " wait_fifo_access=%s"
+            " wait_pmc_pending=0x%08" PRIx32
+            " wait_pmc_enabled=0x%08" PRIx32
+            " wait_pfifo_pending=0x%08" PRIx32
+            " wait_pfifo_enabled=0x%08" PRIx32
+            " wait_pcrtc_pending=0x%08" PRIx32
+            " wait_pcrtc_enabled=0x%08" PRIx32
+            " wait_pgraph_pending=0x%08" PRIx32
+            " wait_pgraph_enabled=0x%08" PRIx32 "\n",
+            xemu_xbe_boot_trace_context(), seq,
+            source && source[0] ? source : "unknown",
+            xemu_xbe_bool_str(ready), reason,
+            xemu_xbe_bool_str(entry_ready),
+            xemu_xbe_bool_str(xemu_xbe_pfifo_stream_idle_transition_observed()),
+            progress_events, progress_limit, virtual_now, virtual_deadline,
+            virtual_deadline_delta,
+            xemu_xbe_bool_str(virtual_has_timers),
+            xemu_xbe_bool_str(virtual_expired),
+            xemu_xbe_bool_str(exec_ctx.cpu_known), exec_ctx.mode,
+            exec_ctx.cpl, exec_ctx.eip, exec_ctx.cs_selector, exec_ctx.esp,
+            exec_ctx.computed_eflags,
+            xemu_xbe_bool_str(exec_ctx.computed_eflags & IF_MASK),
+            xemu_xbe_bool_str(exec_ctx.hflags & HF_INHIBIT_IRQ_MASK),
+            exec_ctx.cpu_interrupt_request,
+            xemu_xbe_bool_str(exec_ctx.cpu_interrupt_request != 0),
+            xemu_xbe_bool_str(exec_ctx.cpu_exit_request),
+            memory_watch_phys,
+            xemu_xbe_bool_str(memory_watch_value_read),
+            memory_watch_value,
+            xemu_xbe_bool_str(xemu_xbe_nv2a_wait_is_stream_idle(&wait_state)),
+            xemu_xbe_bool_str(wait_state.present),
+            wait_state.generation,
+            wait_state.present ? wait_state.state.source : "none",
+            wait_state.present ? wait_state.state.op : "none",
+            pfifo_empty_blocker,
+            wait_state.present ? wait_state.state.seq : 0,
+            wait_state.present ? wait_state.state.dma_get : 0,
+            wait_state.present ? wait_state.state.dma_put : 0,
+            xemu_xbe_bool_str(wait_dma_to_put_known), wait_dma_to_put,
+            xemu_xbe_bool_str(wait_state.present &&
+                              wait_state.state.pfifo_known),
+            xemu_xbe_bool_str(wait_state.present &&
+                              wait_state.state.fifo_access),
+            wait_state.present ? wait_state.state.pmc_pending : 0,
+            wait_state.present ? wait_state.state.pmc_enabled : 0,
+            wait_state.present ? wait_state.state.pfifo_pending : 0,
+            wait_state.present ? wait_state.state.pfifo_enabled : 0,
+            wait_state.present ? wait_state.state.pcrtc_pending : 0,
+            wait_state.present ? wait_state.state.pcrtc_enabled : 0,
+            wait_state.present ? wait_state.state.pgraph_pending : 0,
+            wait_state.present ? wait_state.state.pgraph_enabled : 0);
+#else
+    (void)source;
+    (void)ready;
+    (void)progress_events;
+    (void)progress_limit;
+    (void)virtual_now;
+    (void)virtual_deadline;
+    (void)virtual_has_timers;
+    (void)virtual_expired;
+#endif
+}
+
 void xemu_xbe_boot_trace_observe_tcg_timer_pump(
     uint64_t observed_tbs,
     int64_t interval_tbs,
@@ -5076,6 +7325,8 @@ void xemu_xbe_boot_trace_observe_tcg_timer_pump(
             wait_state.present ? wait_state.state.pcrtc_enabled : 0,
             wait_state.present ? wait_state.state.pgraph_pending : 0,
             wait_state.present ? wait_state.state.pgraph_enabled : 0);
+
+    xemu_xbe_pre_first_read_scheduler_note_timer_pump(timers_progress);
 }
 
 void xemu_xbe_boot_trace_observe_pfifo_pre_commit_timer_pump(
@@ -5365,6 +7616,8 @@ static void xemu_xbe_boot_trace_exec_section_miss(
 static bool xemu_xbe_boot_trace_mark_executed(uint64_t pc, uint32_t tb_size,
                                               const char *source)
 {
+    static bool started_emitted;
+    static bool ended_emitted;
     const char *address_mode;
     const char *phys_match;
     uint64_t image_pc = 0;
@@ -5375,6 +7628,9 @@ static bool xemu_xbe_boot_trace_mark_executed(uint64_t pc, uint32_t tb_size,
     uint32_t section_start;
     uint64_t section_end;
 
+    xemu_call_chain_trace_once(&started_emitted, "started",
+                               "xemu_xbe_boot_trace_mark_executed");
+
     if (!xemu_xbe_pc_overlaps_loaded_image(pc, tb_size, &address_mode,
                                            &image_pc, &pc_mapping,
                                            &image_mapping)) {
@@ -5384,6 +7640,8 @@ static bool xemu_xbe_boot_trace_mark_executed(uint64_t pc, uint32_t tb_size,
                                               image_pc, &pc_mapping,
                                               &image_mapping, phys_match,
                                               source);
+        xemu_call_chain_trace_once(&ended_emitted, "ended",
+                                   "xemu_xbe_boot_trace_mark_executed");
         return false;
     }
     phys_match = xemu_xbe_phys_match_status(address_mode, &pc_mapping,
@@ -5398,6 +7656,8 @@ static bool xemu_xbe_boot_trace_mark_executed(uint64_t pc, uint32_t tb_size,
                                               image_pc, &pc_mapping,
                                               &image_mapping, phys_match,
                                               source);
+        xemu_call_chain_trace_once(&ended_emitted, "ended",
+                                   "xemu_xbe_boot_trace_mark_executed");
         return false;
     }
 
@@ -5427,6 +7687,8 @@ static bool xemu_xbe_boot_trace_mark_executed(uint64_t pc, uint32_t tb_size,
             section_index, section_flags, section_start, section_end,
             source ? source : "pc-sample");
 
+    xemu_call_chain_trace_once(&ended_emitted, "ended",
+                               "xemu_xbe_boot_trace_mark_executed");
     return true;
 }
 
@@ -6253,6 +8515,12 @@ static void xemu_xbe_boot_trace_exec_probe(uint64_t pc, uint32_t tb_size,
 void xemu_xbe_boot_trace_observe_exec(uint64_t guest_pc, uint32_t tb_size,
                                       const char *source)
 {
+    static bool started_emitted;
+    static bool ended_emitted;
+
+    xemu_call_chain_trace_once(&started_emitted, "started",
+                               "xemu_xbe_boot_trace_observe_exec");
+
     if (!xemu_xbe_loaded_observation.loaded_marked ||
         xemu_xbe_loaded_observation.executed_marked) {
         const struct xemu_xbe_dma_header_observation *obs =
@@ -6282,12 +8550,16 @@ void xemu_xbe_boot_trace_observe_exec(uint64_t guest_pc, uint32_t tb_size,
                     obs->read_lba, obs->dma_addr,
                     source ? source : "tcg-tb");
         }
+        xemu_call_chain_trace_once(&ended_emitted, "ended",
+                                   "xemu_xbe_boot_trace_observe_exec");
         return;
     }
 
     if (!xemu_xbe_boot_trace_mark_executed(guest_pc, tb_size, source)) {
         xemu_xbe_boot_trace_exec_probe(guest_pc, tb_size, source);
     }
+    xemu_call_chain_trace_once(&ended_emitted, "ended",
+                               "xemu_xbe_boot_trace_observe_exec");
 }
 
 static bool xemu_xbe_power_of_two(uint64_t value)
@@ -7902,6 +10174,14 @@ static int64_t xemu_xbe_exec_edge_limit(void)
     return limit;
 }
 
+static int64_t xemu_xbe_edge_decision_limit(void)
+{
+    return xemu_xbe_boot_trace_limit_setting(
+        "XEMU_BOOT_TRACE_XBE_EDGE_DECISION_LIMIT",
+        "xbe_edge_decision_limit.txt",
+        0);
+}
+
 static int64_t xemu_xbe_entry_target_limit(void)
 {
     static bool initialized;
@@ -8287,6 +10567,97 @@ static int64_t xemu_xbe_main_loop_timer_probe_limit(void)
         XEMU_XBE_MAIN_LOOP_TIMER_DEFAULT_LIMIT);
 
     return limit;
+}
+
+static int64_t xemu_xbe_timer_opportunity_probe_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_XBE_TIMER_OPPORTUNITY_DEFAULT_LIMIT;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    limit = xemu_xbe_boot_trace_limit_setting(
+        "XEMU_BOOT_TRACE_XBE_TIMER_OPPORTUNITY_LIMIT",
+        "xbe_timer_opportunity_limit.txt",
+        XEMU_XBE_TIMER_OPPORTUNITY_DEFAULT_LIMIT);
+
+    return limit;
+}
+
+static int64_t xemu_xbe_tick_block_probe_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_XBE_TICK_BLOCK_DEFAULT_LIMIT;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    limit = xemu_xbe_boot_trace_limit_setting(
+        "XEMU_BOOT_TRACE_XBE_TICK_BLOCK_LIMIT",
+        "xbe_tick_block_limit.txt",
+        XEMU_XBE_TICK_BLOCK_DEFAULT_LIMIT);
+
+    return limit;
+}
+
+static int64_t xemu_xbe_tick_block_irq_defer_probe_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_XBE_TICK_BLOCK_IRQ_DEFER_DEFAULT_LIMIT;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    limit = xemu_xbe_boot_trace_limit_setting(
+        "XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER_LIMIT",
+        "xbe_tick_block_irq_defer_limit.txt",
+        XEMU_XBE_TICK_BLOCK_IRQ_DEFER_DEFAULT_LIMIT);
+
+    return limit;
+}
+
+static bool xemu_xbe_tick_block_irq_defer_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (initialized) {
+        return enabled;
+    }
+
+    initialized = true;
+    enabled = xemu_xbe_boot_trace_bool_setting(
+        "XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER",
+        "xbe_tick_block_irq_defer.txt",
+        false);
+
+    return enabled;
+}
+
+static int64_t xemu_xbe_pre_first_read_scheduler_tb_budget(void)
+{
+    static bool initialized;
+    static int64_t budget =
+        XEMU_XBE_PRE_FIRST_READ_SCHEDULER_DEFAULT_TB_BUDGET;
+
+    if (initialized) {
+        return budget;
+    }
+
+    initialized = true;
+    budget = xemu_xbe_boot_trace_limit_setting(
+        "XEMU_BOOT_TRACE_XBE_PRE_FIRST_READ_SCHEDULER_TB_BUDGET",
+        "xbe_pre_first_read_scheduler_tb_budget.txt",
+        XEMU_XBE_PRE_FIRST_READ_SCHEDULER_DEFAULT_TB_BUDGET);
+
+    return budget;
 }
 
 int64_t xemu_xbe_boot_trace_tcg_timer_pump_interval(void)

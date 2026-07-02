@@ -56,6 +56,68 @@
 #include "qemu/timer.h"
 #endif
 
+static bool xemu_call_chain_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE_CALL_CHAIN");
+
+    if (value && value[0]) {
+        return strcmp(value, "0");
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    static bool initialized;
+    static bool enabled;
+    const char *paths[] = {
+        "/xemu-fixtures/call_chain_trace.txt",
+        "/xemu-smoke/call_chain_trace.txt",
+        "/xemu-smoke-out/call_chain_trace.txt",
+        NULL,
+    };
+    char buffer[32];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, sizeof(buffer), fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (!buffer[0]) {
+            continue;
+        }
+
+        enabled = g_ascii_strcasecmp(buffer, "0") &&
+                  g_ascii_strcasecmp(buffer, "false") &&
+                  g_ascii_strcasecmp(buffer, "no") &&
+                  g_ascii_strcasecmp(buffer, "off");
+        return enabled;
+    }
+#endif
+
+    return false;
+}
+
+static void xemu_call_chain_trace_once(bool *emitted, const char *event,
+                                       const char *method)
+{
+    if (!*emitted && xemu_call_chain_trace_enabled()) {
+        *emitted = true;
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -981,12 +1043,54 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
+    static bool started_emitted;
+    static bool ended_emitted;
+
+    xemu_call_chain_trace_once(&started_emitted, "started",
+                               "cpu_loop_exec_tb");
 #if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     uint32_t tb_size = tb->size;
     bool xemu_tcg_timer_pump_before_tb =
         xemu_xbe_boot_trace_tcg_timer_pump_before_tb();
+    uint32_t xemu_tick_block_irq_defer_mask = CPU_INTERRUPT_HARD;
+    uint32_t xemu_tick_block_saved_interrupt_request = 0;
+    uint32_t xemu_tick_block_post_interrupt_request = 0;
+    uint32_t xemu_tick_block_restored_interrupt_request = 0;
+    uint16_t xemu_tick_block_saved_icount_decr_high = 0;
+    uint16_t xemu_tick_block_post_icount_decr_high = 0;
+    uint16_t xemu_tick_block_restored_icount_decr_high = 0;
+    bool xemu_tick_block_saved_exit_request = false;
+    bool xemu_tick_block_post_exit_request = false;
+    bool xemu_tick_block_restored_exit_request = false;
+    bool xemu_tick_block_irq_deferred = false;
+#ifdef CPU_INTERRUPT_VIRQ
+    xemu_tick_block_irq_defer_mask |= CPU_INTERRUPT_VIRQ;
+#endif
 
     xemu_xbe_boot_trace_observe_exec(pc, tb_size, "tcg-tb");
+    xemu_xbe_boot_trace_tick_block_pre_tb(pc, tb_size, "tcg-tb-pre");
+    xemu_tick_block_saved_interrupt_request =
+        qatomic_read(&cpu->interrupt_request);
+    xemu_tick_block_saved_exit_request =
+        qatomic_load_acquire(&cpu->exit_request);
+    xemu_tick_block_irq_deferred =
+        xemu_xbe_boot_trace_tick_block_irq_defer_pre_tb(
+            pc, tb_size, xemu_tick_block_saved_interrupt_request,
+            xemu_tick_block_saved_exit_request, CPU_INTERRUPT_HARD,
+            xemu_tick_block_irq_defer_mask, "tcg-tb-pre");
+    if (xemu_tick_block_irq_deferred) {
+        xemu_tick_block_saved_interrupt_request =
+            qatomic_read(&cpu->interrupt_request);
+        xemu_tick_block_saved_exit_request =
+            qatomic_load_acquire(&cpu->exit_request);
+        xemu_tick_block_saved_icount_decr_high =
+            qatomic_read(&cpu->neg.icount_decr.u16.high);
+        cpu_reset_interrupt(cpu, xemu_tick_block_irq_defer_mask);
+        qatomic_set(&cpu->exit_request, false);
+        qatomic_set_mb(&cpu->neg.icount_decr.u16.high, 0);
+    } else {
+        xemu_xbe_boot_trace_edge_decision_pre_tb(pc, tb_size, "tcg-tb-pre");
+    }
     if (xemu_tcg_timer_pump_before_tb) {
         xemu_boot_trace_tcg_timer_pump();
     }
@@ -994,14 +1098,55 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
 #if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+    xemu_xbe_boot_trace_edge_decision_post_tb(pc, tb_size, *tb_exit,
+                                              "tcg-tb-post");
+    xemu_xbe_boot_trace_tick_block_post_tb(pc, tb_size, *tb_exit,
+                                           "tcg-tb-post");
+    if (xemu_tick_block_irq_deferred) {
+        xemu_tick_block_post_interrupt_request =
+            qatomic_read(&cpu->interrupt_request);
+        xemu_tick_block_post_exit_request =
+            qatomic_load_acquire(&cpu->exit_request);
+        xemu_tick_block_post_icount_decr_high =
+            qatomic_read(&cpu->neg.icount_decr.u16.high);
+        cpu_set_interrupt(cpu, xemu_tick_block_saved_interrupt_request &
+                          xemu_tick_block_irq_defer_mask);
+        if (xemu_tick_block_saved_exit_request) {
+            qatomic_set(&cpu->exit_request, true);
+        }
+        if (xemu_tick_block_saved_icount_decr_high != 0) {
+            qatomic_store_release(&cpu->neg.icount_decr.u16.high,
+                                  xemu_tick_block_saved_icount_decr_high);
+        }
+        xemu_tick_block_restored_interrupt_request =
+            qatomic_read(&cpu->interrupt_request);
+        xemu_tick_block_restored_exit_request =
+            qatomic_load_acquire(&cpu->exit_request);
+        xemu_tick_block_restored_icount_decr_high =
+            qatomic_read(&cpu->neg.icount_decr.u16.high);
+        xemu_xbe_boot_trace_tick_block_irq_defer_post_tb(
+            pc, tb_size, *tb_exit,
+            xemu_tick_block_saved_interrupt_request,
+            xemu_tick_block_saved_exit_request,
+            xemu_tick_block_saved_icount_decr_high,
+            xemu_tick_block_post_interrupt_request,
+            xemu_tick_block_post_exit_request,
+            xemu_tick_block_post_icount_decr_high,
+            xemu_tick_block_restored_interrupt_request,
+            xemu_tick_block_restored_exit_request,
+            xemu_tick_block_restored_icount_decr_high,
+            "tcg-tb-post");
+    }
     xemu_xbe_boot_trace_observe_exec_transition(pc, tb_size, *tb_exit,
                                                 "tcg-tb-post");
-    if (!xemu_tcg_timer_pump_before_tb) {
+    if (xemu_xbe_boot_trace_tcg_timer_pump_after_tb()) {
         xemu_boot_trace_tcg_timer_pump();
     }
 #endif
     if (*tb_exit != TB_EXIT_REQUESTED) {
         *last_tb = tb;
+        xemu_call_chain_trace_once(&ended_emitted, "ended",
+                                   "cpu_loop_exec_tb");
         return;
     }
 
@@ -1014,6 +1159,8 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
          * cpu_handle_interrupt.  cpu_handle_interrupt will also
          * clear cpu->icount_decr.u16.high.
          */
+        xemu_call_chain_trace_once(&ended_emitted, "ended",
+                                   "cpu_loop_exec_tb");
         return;
     }
 
@@ -1038,6 +1185,7 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
         cpu->cflags_next_tb = (tb->cflags & ~CF_COUNT_MASK) | insns_left;
     }
 #endif
+    xemu_call_chain_trace_once(&ended_emitted, "ended", "cpu_loop_exec_tb");
 }
 
 /* main execution loop */
@@ -1045,16 +1193,32 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 static int __attribute__((noinline))
 cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 {
+    static bool started_emitted;
+    static bool ended_emitted;
     int ret;
+
+    xemu_call_chain_trace_once(&started_emitted, "started", "cpu_exec_loop");
 
     /* if an exception is pending, we execute it here */
     while (!cpu_handle_exception(cpu, &ret)) {
         TranslationBlock *last_tb = NULL;
         int tb_exit = 0;
 
-        while (!cpu_handle_interrupt(cpu, &last_tb)) {
+        while (true) {
             TranslationBlock *tb;
-            TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+            TCGTBCPUState s;
+
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+            if (xemu_xbe_boot_trace_tcg_timer_pump_before_interrupt()) {
+                xemu_boot_trace_tcg_timer_pump();
+            }
+#endif
+
+            if (cpu_handle_interrupt(cpu, &last_tb)) {
+                break;
+            }
+
+            s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
             s.cflags = cpu->cflags_next_tb;
 
             /*
@@ -1110,12 +1274,17 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             }
 
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
+            xemu_xbe_boot_trace_pre_first_read_scheduler_after_tb(
+                s.pc, tb->size, tb_exit, "tcg-loop-after-tb");
+#endif
 
             /* Try to align the host and virtual clocks
                if the guest is in advance */
             align_clocks(sc, cpu);
         }
     }
+    xemu_call_chain_trace_once(&ended_emitted, "ended", "cpu_exec_loop");
     return ret;
 }
 
@@ -1131,13 +1300,18 @@ static int cpu_exec_setjmp(CPUState *cpu, SyncClocks *sc)
 
 int cpu_exec(CPUState *cpu)
 {
+    static bool started_emitted;
+    static bool ended_emitted;
     int ret;
     SyncClocks sc = { 0 };
+
+    xemu_call_chain_trace_once(&started_emitted, "started", "cpu_exec");
 
     /* replay_interrupt may need current_cpu */
     current_cpu = cpu;
 
     if (cpu_handle_halt(cpu)) {
+        xemu_call_chain_trace_once(&ended_emitted, "ended", "cpu_exec");
         return EXCP_HALTED;
     }
 
@@ -1155,6 +1329,7 @@ int cpu_exec(CPUState *cpu)
     ret = cpu_exec_setjmp(cpu, &sc);
 
     cpu_exec_exit(cpu);
+    xemu_call_chain_trace_once(&ended_emitted, "ended", "cpu_exec");
     return ret;
 }
 

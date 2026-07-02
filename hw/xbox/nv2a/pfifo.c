@@ -26,6 +26,7 @@
 #define XEMU_NV2A_PFIFO_TRACE_DEFAULT_LIMIT 128
 #define XEMU_NV2A_PFIFO_TRACE_WINDOW_DEFAULT_START 0x03880e00u
 #define XEMU_NV2A_PFIFO_TRACE_WINDOW_DEFAULT_LIMIT 512
+#define XEMU_NV2A_PFIFO_SCHEDULER_TRACE_DEFAULT_LIMIT 128
 
 static bool pfifo_boot_trace_enabled(void)
 {
@@ -170,6 +171,123 @@ static int64_t pfifo_boot_trace_window_limit(void)
     }
 
     return limit;
+}
+
+static int64_t pfifo_boot_trace_scheduler_limit(void)
+{
+    static bool initialized;
+    static int64_t limit = XEMU_NV2A_PFIFO_SCHEDULER_TRACE_DEFAULT_LIMIT;
+    const char *value;
+    char *end = NULL;
+
+    if (initialized) {
+        return limit;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BOOT_TRACE_NV2A_PFIFO_SCHEDULER_LIMIT");
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    limit = g_ascii_strtoll(value, &end, 10);
+    if (end == value || limit < 0) {
+        limit = XEMU_NV2A_PFIFO_SCHEDULER_TRACE_DEFAULT_LIMIT;
+    }
+
+    return limit;
+}
+
+static void pfifo_boot_trace_scheduler_state(NV2AState *d, const char *op,
+                                             const char *kick_source)
+{
+    static uint64_t count;
+    int64_t limit;
+
+    if (!pfifo_boot_trace_enabled() || !xemu_xbe_boot_trace_loaded()) {
+        return;
+    }
+
+    limit = pfifo_boot_trace_scheduler_limit();
+    if (limit == 0 || count >= (uint64_t)limit) {
+        return;
+    }
+    count++;
+
+    uint32_t push0 = d->pfifo.regs[NV_PFIFO_CACHE1_PUSH0];
+    uint32_t push1 = d->pfifo.regs[NV_PFIFO_CACHE1_PUSH1];
+    uint32_t pull0 = d->pfifo.regs[NV_PFIFO_CACHE1_PULL0];
+    uint32_t dma_push = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUSH];
+    uint32_t dma_get = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
+    uint32_t dma_put = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
+    uint32_t dma_state = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_STATE];
+    unsigned int channel_id = GET_MASK(push1, NV_PFIFO_CACHE1_PUSH1_CHID);
+    bool push_access = GET_MASK(push0, NV_PFIFO_CACHE1_PUSH0_ACCESS);
+    bool pull_access = GET_MASK(pull0, NV_PFIFO_CACHE1_PULL0_ACCESS);
+    bool dma_push_access = GET_MASK(dma_push, NV_PFIFO_CACHE1_DMA_PUSH_ACCESS);
+    bool dma_push_status = GET_MASK(dma_push, NV_PFIFO_CACHE1_DMA_PUSH_STATUS);
+    bool fifo_access = can_fifo_access(d);
+    bool waiting_flip = qatomic_read(&d->pgraph.waiting_for_flip);
+    bool waiting_nop = qatomic_read(&d->pgraph.waiting_for_nop);
+    bool waiting_context =
+        qatomic_read(&d->pgraph.waiting_for_context_switch);
+    bool dma_to_put_known = dma_put >= dma_get;
+    uint32_t dma_to_put = dma_to_put_known ? dma_put - dma_get : 0;
+
+    fprintf(stderr,
+            "BOOT_MARK b6 pfifo=scheduler context=%s"
+            " seq=%" PRIu64
+            " op=%s"
+            " kick_source=%s"
+            " channel=%u"
+            " dma_get=0x%08x"
+            " dma_put=0x%08x"
+            " dma_to_put_known=%s"
+            " dma_to_put=%u"
+            " dma_state_method=0x%04x"
+            " dma_state_count=%u"
+            " dma_state_type=%u"
+            " dma_state_subchannel=%u"
+            " push_access=%s"
+            " pull_access=%s"
+            " dma_push_access=%s"
+            " dma_push_status=%s"
+            " fifo_access=%s"
+            " waiting_flip=%s"
+            " waiting_nop=%s"
+            " waiting_context=%s"
+            " halt=%s"
+            " fifo_kick=%s"
+            " pmc_pending=0x%08x"
+            " pmc_enabled=0x%08x"
+            " pfifo_pending=0x%08x"
+            " pfifo_enabled=0x%08x"
+            " pcrtc_pending=0x%08x"
+            " pcrtc_enabled=0x%08x"
+            " pgraph_pending=0x%08x"
+            " pgraph_enabled=0x%08x\n",
+            pfifo_boot_trace_context(), count, op,
+            kick_source && kick_source[0] ? kick_source : "none",
+            channel_id, dma_get, dma_put,
+            dma_to_put_known ? "yes" : "no", dma_to_put,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD) << 2,
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_COUNT),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE),
+            GET_MASK(dma_state, NV_PFIFO_CACHE1_DMA_STATE_SUBCHANNEL),
+            push_access ? "yes" : "no",
+            pull_access ? "yes" : "no",
+            dma_push_access ? "yes" : "no",
+            dma_push_status ? "yes" : "no",
+            fifo_access ? "yes" : "no",
+            waiting_flip ? "yes" : "no",
+            waiting_nop ? "yes" : "no",
+            waiting_context ? "yes" : "no",
+            d->pfifo.halt ? "yes" : "no",
+            d->pfifo.fifo_kick ? "yes" : "no",
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts,
+            d->pfifo.pending_interrupts, d->pfifo.enabled_interrupts,
+            d->pcrtc.pending_interrupts, d->pcrtc.enabled_interrupts,
+            d->pgraph.pending_interrupts, d->pgraph.enabled_interrupts);
 }
 
 static void pfifo_boot_trace_window_state(NV2AState *d, const char *op,
@@ -785,6 +903,7 @@ uint64_t pfifo_read(void *opaque, hwaddr addr, unsigned int size)
 void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
+    const char *kick_source = "pfifo-write";
 
     nv2a_reg_log_write(NV_PFIFO, addr, size, val);
 
@@ -792,26 +911,35 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     switch (addr) {
     case NV_PFIFO_INTR_0:
+        kick_source = "pfifo-intr-clear";
         d->pfifo.pending_interrupts &= ~val;
         nv2a_update_irq(d);
         break;
     case NV_PFIFO_INTR_EN_0:
+        kick_source = "pfifo-intr-enable";
         d->pfifo.enabled_interrupts = val;
         nv2a_update_irq(d);
         break;
     default:
+        kick_source = "pfifo-register-write";
         d->pfifo.regs[addr] = val;
         break;
     }
 
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, kick_source);
 
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
 void pfifo_kick(NV2AState *d)
 {
+    pfifo_kick_with_source(d, "unspecified");
+}
+
+void pfifo_kick_with_source(NV2AState *d, const char *source)
+{
     d->pfifo.fifo_kick = true;
+    pfifo_boot_trace_scheduler_state(d, "kick", source);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
 }
 
@@ -1142,6 +1270,48 @@ static void pfifo_run_pusher(NV2AState *d)
             trace_parameter = word;
             trace_processed = num_words_processed;
 
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+            bool pcrtc_prestream_final_candidate =
+                dma_get_before != dma_get_v &&
+                dma_get_v == dma_put_v &&
+                dma_put_v >= dma_get_before &&
+                dma_put_v - dma_get_before == 4 &&
+                num_words_available == 1 &&
+                num_words_processed == 1;
+            bool pcrtc_prestream_fifo_access = can_fifo_access(d);
+            bool pcrtc_prestream_pfifo_halt = d->pfifo.halt;
+            bool pcrtc_prestream_pfifo_kick = d->pfifo.fifo_kick;
+            bool pcrtc_prestream_waiting_flip =
+                qatomic_read(&d->pgraph.waiting_for_flip);
+            bool pcrtc_prestream_waiting_nop =
+                qatomic_read(&d->pgraph.waiting_for_nop);
+            bool pcrtc_prestream_waiting_context =
+                qatomic_read(&d->pgraph.waiting_for_context_switch);
+
+            /*
+             * Only the final-window candidate can raise the diagnostic PCRTC
+             * IRQ. Deliver that path under BQL, following the local PFIFO
+             * timer-pump pattern so cpu_interrupt() sees valid ownership.
+             */
+            if (pcrtc_prestream_final_candidate) {
+                qemu_mutex_unlock(&d->pfifo.lock);
+                bql_lock();
+            }
+            nv2a_browser_deterministic_pcrtc_prestream_maybe_raise(
+                d, "pfifo-final-window", dma_get_before, dma_get_v,
+                dma_put_v, method, word, num_words_available,
+                num_words_processed, pcrtc_prestream_fifo_access,
+                pcrtc_prestream_pfifo_halt,
+                pcrtc_prestream_pfifo_kick,
+                pcrtc_prestream_waiting_flip,
+                pcrtc_prestream_waiting_nop,
+                pcrtc_prestream_waiting_context);
+            if (pcrtc_prestream_final_candidate) {
+                bql_unlock();
+                qemu_mutex_lock(&d->pfifo.lock);
+            }
+#endif
+
             dma_get_v += (num_words_processed-1)*4;
 
             if (method_type == NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC) {
@@ -1285,21 +1455,33 @@ void *pfifo_thread(void *arg)
 
     qemu_mutex_lock(&d->pfifo.lock);
     while (true) {
+        pfifo_boot_trace_scheduler_state(d, "thread-loop", NULL);
         d->pfifo.fifo_kick = false;
+        pfifo_boot_trace_scheduler_state(d, "kick-cleared", NULL);
 
         pgraph_process_pending(d);
+        pfifo_boot_trace_scheduler_state(d, "after-pgraph-pending", NULL);
 
         if (!d->pfifo.halt) {
+            pfifo_boot_trace_scheduler_state(d, "before-run-pusher", NULL);
             pfifo_run_pusher(d);
+            pfifo_boot_trace_scheduler_state(d, "after-run-pusher", NULL);
+        } else {
+            pfifo_boot_trace_scheduler_state(d, "skip-halt", NULL);
         }
 
         pgraph_process_pending_reports(d);
+        pfifo_boot_trace_scheduler_state(d, "after-pgraph-reports", NULL);
 
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
 
             // Both the pusher and puller are waiting for some action
+            pfifo_boot_trace_scheduler_state(d, "idle-wait-before", NULL);
             qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            pfifo_boot_trace_scheduler_state(d, "idle-wait-after", NULL);
+        } else {
+            pfifo_boot_trace_scheduler_state(d, "skip-wait-kicked", NULL);
         }
 
         if (d->exiting) {

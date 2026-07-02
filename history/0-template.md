@@ -34,6 +34,9 @@
 - Independent critique used: yes | no
 - If yes, critique decision: continue | revise | stop
 - If yes, critique summary:
+- Loop-check progress-method critique included: yes | no
+- If yes, progress-method critique summary:
+- If yes, process adjustment for next 2-3 turns:
 
 ## Next Step
 

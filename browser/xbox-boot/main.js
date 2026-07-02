@@ -502,6 +502,11 @@ const traceOptionSpecs = [
     name: "xbe_memory_watch_access",
   },
   {
+    key: "nv2aUserDmaPutLimit",
+    globalKey: "xemuBrowserBootNv2aUserDmaPutLimit",
+    name: "nv2a_user_dma_put_limit",
+  },
+  {
     key: "xbePicIrqLimit",
     globalKey: "xemuBrowserBootXbePicIrqLimit",
     name: "xbe_pic_irq_limit",
@@ -527,6 +532,31 @@ const traceOptionSpecs = [
     name: "xbe_main_loop_timer_limit",
   },
   {
+    key: "xbeTimerOpportunityLimit",
+    globalKey: "xemuBrowserBootXbeTimerOpportunityLimit",
+    name: "xbe_timer_opportunity_limit",
+  },
+  {
+    key: "xbeEdgeDecisionLimit",
+    globalKey: "xemuBrowserBootXbeEdgeDecisionLimit",
+    name: "xbe_edge_decision_limit",
+  },
+  {
+    key: "xbeTickBlockLimit",
+    globalKey: "xemuBrowserBootXbeTickBlockLimit",
+    name: "xbe_tick_block_limit",
+  },
+  {
+    key: "xbeTickBlockIrqDefer",
+    globalKey: "xemuBrowserBootXbeTickBlockIrqDefer",
+    name: "xbe_tick_block_irq_defer",
+  },
+  {
+    key: "xbeTickBlockIrqDeferLimit",
+    globalKey: "xemuBrowserBootXbeTickBlockIrqDeferLimit",
+    name: "xbe_tick_block_irq_defer_limit",
+  },
+  {
     key: "browserHeadlessTimerPumpProgressLimit",
     globalKey: "xemuBrowserBootHeadlessTimerPumpProgressLimit",
     name: "browser_headless_timer_pump_progress_limit",
@@ -535,6 +565,26 @@ const traceOptionSpecs = [
     key: "browserHeadlessTimerPumpMode",
     globalKey: "xemuBrowserBootHeadlessTimerPumpMode",
     name: "browser_headless_timer_pump_mode",
+  },
+  {
+    key: "browserBootDeterministic",
+    globalKey: "xemuBrowserBootDeterministic",
+    name: "browser_boot_deterministic",
+  },
+  {
+    key: "browserBootDeterministicTimerSteps",
+    globalKey: "xemuBrowserBootDeterministicTimerSteps",
+    name: "browser_boot_deterministic_timer_steps",
+  },
+  {
+    key: "browserBootDeterministicWarmupProgressLimit",
+    globalKey: "xemuBrowserBootDeterministicWarmupProgressLimit",
+    name: "browser_boot_deterministic_warmup_progress_limit",
+  },
+  {
+    key: "browserBootDeterministicPcrtcPrestream",
+    globalKey: "xemuBrowserBootDeterministicPcrtcPrestream",
+    name: "browser_boot_deterministic_pcrtc_prestream",
   },
   {
     key: "xbeTcgTimerPumpInterval",
@@ -565,6 +615,11 @@ const traceOptionSpecs = [
     key: "xbeIrqWatch",
     globalKey: "xemuBrowserBootXbeIrqWatch",
     name: "xbe_irq_watch",
+  },
+  {
+    key: "callChainTrace",
+    globalKey: "xemuBrowserBootCallChainTrace",
+    name: "call_chain_trace",
   },
 ];
 

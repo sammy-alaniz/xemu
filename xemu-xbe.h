@@ -136,6 +136,10 @@ bool xemu_xbe_boot_trace_entry_ready(void);
 // current B6 diagnostic point.
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready(void);
 
+// True when the active browser timer diagnostic is at the exact pre-stream
+// PCRTC intr-clear wait state used by deterministic PCRTC pre-stream pumping.
+bool xemu_xbe_boot_trace_main_loop_timer_pump_pcrtc_prestream_ready(void);
+
 // True when the active browser timer diagnostic should run one QEMU-thread
 // main-loop timer pass at the PFIFO stream-idle transition edge.
 bool xemu_xbe_boot_trace_main_loop_timer_pump_ready_edge_enabled(void);
@@ -151,6 +155,9 @@ bool xemu_xbe_boot_trace_main_loop_timer_pump_presleep_enabled(void);
 // True once B6 dashboard XBE execution has been accepted.
 bool xemu_xbe_boot_trace_executed(void);
 
+// True after PFIFO stream-idle transition/boundary has been observed.
+bool xemu_xbe_boot_trace_pfifo_stream_idle_transition_observed(void);
+
 // True after a B6 dashboard XBE DMA/header observation or load marker,
 // before accepted execution evidence.
 bool xemu_xbe_boot_trace_dashboard_observed(void);
@@ -162,6 +169,14 @@ bool xemu_xbe_boot_trace_tcg_timer_pump_ready(void);
 // True when the active browser TCG-side timer diagnostic should pump before
 // executing the selected translated block instead of after it.
 bool xemu_xbe_boot_trace_tcg_timer_pump_before_tb(void);
+
+// True when the active browser TCG-side timer diagnostic should pump before
+// cpu_handle_interrupt(), letting normal interrupt dispatch run afterward.
+bool xemu_xbe_boot_trace_tcg_timer_pump_before_interrupt(void);
+
+// True when the active browser TCG-side timer diagnostic should pump after the
+// translated block. This excludes before-TB and before-interrupt modes.
+bool xemu_xbe_boot_trace_tcg_timer_pump_after_tb(void);
 
 // Browser TCG-side virtual timer pump interval in translated blocks. Zero
 // means disabled.
@@ -473,6 +488,18 @@ void xemu_xbe_boot_trace_observe_main_loop_timers(
     bool virtual_has_timers_after,
     bool virtual_expired_after);
 
+// Record a browser-only B6 diagnostic timer opportunity before a headless
+// host-side pump either runs or is skipped.
+void xemu_xbe_boot_trace_observe_browser_timer_opportunity(
+    const char *source,
+    bool ready,
+    uint64_t progress_events,
+    int64_t progress_limit,
+    int64_t virtual_now,
+    int64_t virtual_deadline,
+    bool virtual_has_timers,
+    bool virtual_expired);
+
 // Record a browser-only B6 diagnostic timer pump from the TCG CPU loop.
 void xemu_xbe_boot_trace_observe_tcg_timer_pump(
     uint64_t observed_tbs,
@@ -517,6 +544,60 @@ void xemu_xbe_boot_trace_observe_dma_read(int64_t read_lba, int nsectors);
 void xemu_xbe_boot_trace_observe_exec(uint64_t guest_pc,
                                       uint32_t tb_size,
                                       const char *source);
+
+// Capture pre-TB branch-decision inputs for bounded B6 edge diagnostics.
+void xemu_xbe_boot_trace_edge_decision_pre_tb(uint64_t guest_pc,
+                                              uint32_t tb_size,
+                                              const char *source);
+
+// Emit the paired post-TB edge-decision marker after a pre-TB capture.
+void xemu_xbe_boot_trace_edge_decision_post_tb(uint64_t guest_pc,
+                                               uint32_t tb_size,
+                                               int tb_exit,
+                                               const char *source);
+
+// Capture pre-TB tick-block inputs for the B6 watched-word completion counter.
+void xemu_xbe_boot_trace_tick_block_pre_tb(uint64_t guest_pc,
+                                           uint32_t tb_size,
+                                           const char *source);
+
+// Emit a compact marker when the watched-word tick block completes.
+void xemu_xbe_boot_trace_tick_block_post_tb(uint64_t guest_pc,
+                                            uint32_t tb_size,
+                                            int tb_exit,
+                                            const char *source);
+
+// Browser-only B6 diagnostic: optionally let the watched-word tick block
+// execute once before a pending hard IRQ is serviced.
+bool xemu_xbe_boot_trace_tick_block_irq_defer_pre_tb(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    uint32_t interrupt_request,
+    bool cpu_exit_request,
+    uint32_t hard_irq_mask,
+    uint32_t defer_mask,
+    const char *source);
+void xemu_xbe_boot_trace_tick_block_irq_defer_post_tb(
+    uint64_t guest_pc,
+    uint32_t tb_size,
+    int tb_exit,
+    uint32_t saved_interrupt_request,
+    bool saved_exit_request,
+    uint16_t saved_icount_decr_high,
+    uint32_t post_interrupt_request,
+    bool post_exit_request,
+    uint16_t post_icount_decr_high,
+    uint32_t restored_interrupt_request,
+    bool restored_exit_request,
+    uint16_t restored_icount_decr_high,
+    const char *source);
+
+// Record one translated-block step while the opt-in pre-first-read scheduler
+// owns bounded guest progress.
+void xemu_xbe_boot_trace_pre_first_read_scheduler_after_tb(uint64_t guest_pc,
+                                                           uint32_t tb_size,
+                                                           int tb_exit,
+                                                           const char *source);
 
 // Record the CPU state immediately after a translated block executes.
 void xemu_xbe_boot_trace_observe_exec_transition(uint64_t start_pc,

@@ -149,6 +149,75 @@
 #include "ui/xemu-input.h"
 #include "hw/xbox/eeprom_generation.h"
 
+static bool xemu_call_chain_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE_CALL_CHAIN");
+
+    if (value && value[0]) {
+        return strcmp(value, "0");
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    static bool initialized;
+    static bool enabled;
+    const char *paths[] = {
+        "/xemu-fixtures/call_chain_trace.txt",
+        "/xemu-smoke/call_chain_trace.txt",
+        "/xemu-smoke-out/call_chain_trace.txt",
+        NULL,
+    };
+    char buffer[32];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, sizeof(buffer), fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (!buffer[0]) {
+            continue;
+        }
+
+        enabled = g_ascii_strcasecmp(buffer, "0") &&
+                  g_ascii_strcasecmp(buffer, "false") &&
+                  g_ascii_strcasecmp(buffer, "no") &&
+                  g_ascii_strcasecmp(buffer, "off");
+        return enabled;
+    }
+#endif
+
+    return false;
+}
+
+static void xemu_call_chain_trace(const char *event, const char *method)
+{
+    if (xemu_call_chain_trace_enabled()) {
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
+static void xemu_call_chain_trace_once(bool *emitted, const char *event,
+                                       const char *method)
+{
+    if (!*emitted && xemu_call_chain_trace_enabled()) {
+        *emitted = true;
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
 #define MAX_VIRTIO_CONSOLES 1
 
 typedef struct BlockdevOptionsQueueEntry {
@@ -2773,13 +2842,20 @@ static void qemu_init_displays(void)
 
 static void qemu_init_board(void)
 {
+    static bool started_emitted;
+    static bool machine_setup_started_emitted;
     MachineClass *machine_class = MACHINE_GET_CLASS(current_machine);
+
+    xemu_call_chain_trace_once(&started_emitted, "started", "qemu_init_board");
 
     /* process plugin before CPUs are created, but once -smp has been parsed */
     qemu_plugin_load_list(&plugin_list, &error_fatal);
 
     /* From here on we enter MACHINE_PHASE_INITIALIZED.  */
+    xemu_call_chain_trace_once(&machine_setup_started_emitted, "started",
+                               "machine/device/CPU setup");
     machine_run_board_init(current_machine, mem_path, &error_fatal);
+    xemu_call_chain_trace("ended", "machine/device/CPU setup");
 
     if (machine_class->auto_create_sdcard) {
         bool ambigous;
@@ -2797,6 +2873,7 @@ static void qemu_init_board(void)
     drive_check_orphaned();
 
     realtime_init();
+    xemu_call_chain_trace("ended", "qemu_init_board");
 }
 
 static void qemu_create_cli_devices(void)
@@ -2959,6 +3036,7 @@ static const char *get_eeprom_path(void)
 
 void qemu_init(int argc, char **argv)
 {
+    static bool started_emitted;
     QemuOpts *opts;
     QemuOpts *icount_opts = NULL, *accel_opts = NULL;
     QemuOptsList *olist;
@@ -2974,6 +3052,8 @@ void qemu_init(int argc, char **argv)
     bool headless_boot = headless_boot_env && headless_boot_env[0] &&
                          strcmp(headless_boot_env, "0");
 #endif
+
+    xemu_call_chain_trace_once(&started_emitted, "started", "qemu_init");
 
 /*****************************************************************************/
 
@@ -4144,4 +4224,5 @@ void qemu_init(int argc, char **argv)
         os_setup_post();
     }
     resume_mux_open();
+    xemu_call_chain_trace("ended", "qemu_init");
 }

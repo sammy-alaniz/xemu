@@ -46,7 +46,7 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
     qatomic_set(&d->pgraph.vk_renderer_state->download_dirty_surfaces_pending, true);
     qemu_mutex_unlock(&d->pgraph.lock);
     qemu_mutex_lock(&d->pfifo.lock);
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, "vk-surface-scale-download");
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.vk_renderer_state->dirty_surfaces_download_complete);
 
@@ -55,13 +55,13 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
     qatomic_set(&d->pgraph.flush_pending, true);
     qemu_mutex_unlock(&d->pgraph.lock);
     qemu_mutex_lock(&d->pfifo.lock);
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, "vk-surface-scale-flush");
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.flush_complete);
 
     qemu_mutex_lock(&d->pfifo.lock);
     qatomic_set(&d->pfifo.halt, false);
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, "vk-surface-scale-resume");
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
@@ -502,7 +502,7 @@ void pgraph_vk_wait_for_surface_download(SurfaceBinding *surface)
         qemu_event_reset(&d->pgraph.vk_renderer_state->downloads_complete);
         qatomic_set(&surface->download_pending, true);
         qatomic_set(&d->pgraph.vk_renderer_state->downloads_pending, true);
-        pfifo_kick(d);
+        pfifo_kick_with_source(d, "vk-surface-download");
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_event_wait(&d->pgraph.vk_renderer_state->downloads_complete);
     }
@@ -573,7 +573,7 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
         qemu_mutex_lock(&d->pfifo.lock);
         qemu_event_reset(&r->downloads_complete);
         qatomic_set(&r->downloads_pending, true);
-        pfifo_kick(d);
+        pfifo_kick_with_source(d, "vk-surface-access-downloads");
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_event_wait(&r->downloads_complete);
     }

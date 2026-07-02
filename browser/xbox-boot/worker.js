@@ -244,6 +244,11 @@ const traceOptionSpecs = [
     fileName: "xbe_memory_watch_access.txt",
   },
   {
+    key: "nv2aUserDmaPutLimit",
+    name: "nv2a_user_dma_put_limit",
+    fileName: "nv2a_user_dma_put_limit.txt",
+  },
+  {
     key: "xbePicIrqLimit",
     name: "xbe_pic_irq_limit",
     fileName: "xbe_pic_irq_limit.txt",
@@ -269,6 +274,31 @@ const traceOptionSpecs = [
     fileName: "xbe_main_loop_timer_limit.txt",
   },
   {
+    key: "xbeTimerOpportunityLimit",
+    name: "xbe_timer_opportunity_limit",
+    fileName: "xbe_timer_opportunity_limit.txt",
+  },
+  {
+    key: "xbeEdgeDecisionLimit",
+    name: "xbe_edge_decision_limit",
+    fileName: "xbe_edge_decision_limit.txt",
+  },
+  {
+    key: "xbeTickBlockLimit",
+    name: "xbe_tick_block_limit",
+    fileName: "xbe_tick_block_limit.txt",
+  },
+  {
+    key: "xbeTickBlockIrqDefer",
+    name: "xbe_tick_block_irq_defer",
+    fileName: "xbe_tick_block_irq_defer.txt",
+  },
+  {
+    key: "xbeTickBlockIrqDeferLimit",
+    name: "xbe_tick_block_irq_defer_limit",
+    fileName: "xbe_tick_block_irq_defer_limit.txt",
+  },
+  {
     key: "browserHeadlessTimerPumpProgressLimit",
     name: "browser_headless_timer_pump_progress_limit",
     fileName: "browser_headless_timer_pump_progress_limit.txt",
@@ -277,6 +307,26 @@ const traceOptionSpecs = [
     key: "browserHeadlessTimerPumpMode",
     name: "browser_headless_timer_pump_mode",
     fileName: "browser_headless_timer_pump_mode.txt",
+  },
+  {
+    key: "browserBootDeterministic",
+    name: "browser_boot_deterministic",
+    fileName: "browser_boot_deterministic.txt",
+  },
+  {
+    key: "browserBootDeterministicTimerSteps",
+    name: "browser_boot_deterministic_timer_steps",
+    fileName: "browser_boot_deterministic_timer_steps.txt",
+  },
+  {
+    key: "browserBootDeterministicWarmupProgressLimit",
+    name: "browser_boot_deterministic_warmup_progress_limit",
+    fileName: "browser_boot_deterministic_warmup_progress_limit.txt",
+  },
+  {
+    key: "browserBootDeterministicPcrtcPrestream",
+    name: "browser_boot_deterministic_pcrtc_prestream",
+    fileName: "browser_boot_deterministic_pcrtc_prestream.txt",
   },
   {
     key: "xbeTcgTimerPumpInterval",
@@ -307,6 +357,11 @@ const traceOptionSpecs = [
     key: "xbeIrqWatch",
     name: "xbe_irq_watch",
     fileName: "xbe_irq_watch.txt",
+  },
+  {
+    key: "callChainTrace",
+    name: "call_chain_trace",
+    fileName: "call_chain_trace.txt",
   },
 ];
 

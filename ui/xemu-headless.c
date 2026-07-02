@@ -34,6 +34,75 @@ static bool headless_vblank_stopping;
 
 static const int64_t headless_vblank_interval_us = 16667;
 
+static bool xemu_call_chain_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE_CALL_CHAIN");
+
+    if (value && value[0]) {
+        return strcmp(value, "0");
+    }
+
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    static bool initialized;
+    static bool enabled;
+    const char *paths[] = {
+        "/xemu-fixtures/call_chain_trace.txt",
+        "/xemu-smoke/call_chain_trace.txt",
+        "/xemu-smoke-out/call_chain_trace.txt",
+        NULL,
+    };
+    char buffer[32];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    for (int i = 0; paths[i]; i++) {
+        FILE *fp = fopen(paths[i], "r");
+
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, sizeof(buffer), fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (!buffer[0]) {
+            continue;
+        }
+
+        enabled = g_ascii_strcasecmp(buffer, "0") &&
+                  g_ascii_strcasecmp(buffer, "false") &&
+                  g_ascii_strcasecmp(buffer, "no") &&
+                  g_ascii_strcasecmp(buffer, "off");
+        return enabled;
+    }
+#endif
+
+    return false;
+}
+
+static void xemu_call_chain_trace(const char *event, const char *method)
+{
+    if (xemu_call_chain_trace_enabled()) {
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
+static void xemu_call_chain_trace_once(bool *emitted, const char *event,
+                                       const char *method)
+{
+    if (!*emitted && xemu_call_chain_trace_enabled()) {
+        *emitted = true;
+        fprintf(stderr, "CALL_CHAIN %s %s!\n", event, method);
+    }
+}
+
 static bool xemu_boot_trace_enabled(void)
 {
 #ifdef CONFIG_XEMU_BROWSER_BOOT
@@ -87,6 +156,8 @@ static void xemu_headless_main_loop_unlock(void)
     bql_unlock();
 }
 
+static bool xemu_headless_browser_boot_deterministic_enabled(void);
+
 static void xemu_headless_poll_boot_markers(void)
 {
 #ifdef XBOX
@@ -103,6 +174,10 @@ static void xemu_headless_poll_boot_markers(void)
 static bool xemu_headless_browser_timer_pump_ready(void)
 {
 #if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (xemu_xbe_boot_trace_main_loop_timer_pump_pcrtc_prestream_ready() &&
+        !xemu_headless_browser_boot_deterministic_enabled()) {
+        return false;
+    }
     return xemu_xbe_boot_trace_main_loop_timer_pump_ready();
 #else
     return false;
@@ -189,6 +264,170 @@ static void xemu_headless_trace_browser_timer_pump_bql_busy(void)
 #endif
 }
 
+static bool xemu_headless_read_browser_fixture_setting(const char *file_name,
+                                                       char *buffer,
+                                                       size_t buffer_size)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    const char *dirs[] = {
+        "/xemu-fixtures",
+        "/xemu-smoke",
+        "/xemu-smoke-out",
+        NULL,
+    };
+
+    for (int i = 0; dirs[i]; i++) {
+        char path[PATH_MAX];
+        FILE *fp;
+
+        snprintf(path, sizeof(path), "%s/%s", dirs[i], file_name);
+        fp = fopen(path, "r");
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, buffer_size, fp)) {
+            buffer[strcspn(buffer, "\r\n")] = 0;
+        } else {
+            buffer[0] = 0;
+        }
+        fclose(fp);
+
+        if (buffer[0]) {
+            return true;
+        }
+    }
+#else
+    (void)file_name;
+    (void)buffer;
+    (void)buffer_size;
+#endif
+
+    return false;
+}
+
+static bool xemu_headless_browser_boot_deterministic_enabled(void)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static bool initialized;
+    static bool enabled;
+    char file_value[64];
+    const char *value;
+
+    if (initialized) {
+        return enabled;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BROWSER_BOOT_DETERMINISTIC");
+    if ((!value || !value[0]) &&
+        xemu_headless_read_browser_fixture_setting(
+            "browser_boot_deterministic.txt", file_value,
+            sizeof(file_value))) {
+        value = file_value;
+    }
+
+    enabled = value && value[0] &&
+              g_ascii_strcasecmp(value, "0") &&
+              g_ascii_strcasecmp(value, "false") &&
+              g_ascii_strcasecmp(value, "no") &&
+              g_ascii_strcasecmp(value, "off");
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+static uint64_t xemu_headless_browser_boot_deterministic_timer_steps(void)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static bool initialized;
+    static uint64_t steps = 1;
+    char file_value[64];
+    const char *value;
+    const char *source;
+    char *end = NULL;
+    int64_t parsed;
+
+    if (initialized) {
+        return steps;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS");
+    source = "XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS";
+    if ((!value || !value[0]) &&
+        xemu_headless_read_browser_fixture_setting(
+            "browser_boot_deterministic_timer_steps.txt", file_value,
+            sizeof(file_value))) {
+        value = file_value;
+        source = "browser_boot_deterministic_timer_steps.txt";
+    }
+
+    if (!value || !value[0]) {
+        return steps;
+    }
+
+    parsed = g_ascii_strtoll(value, &end, 10);
+    if (end == value || *end || parsed < 1) {
+        fprintf(stderr,
+                "Invalid %s='%s'; using 1 deterministic timer step\n",
+                source, value);
+        return steps;
+    }
+
+    steps = (uint64_t)parsed;
+    return steps;
+#else
+    return 1;
+#endif
+}
+
+static int64_t xemu_headless_browser_boot_deterministic_warmup_limit(void)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static bool initialized;
+    static int64_t limit = 1;
+    char file_value[64];
+    const char *value;
+    const char *source;
+    char *end = NULL;
+    int64_t parsed;
+
+    if (initialized) {
+        return limit;
+    }
+
+    initialized = true;
+    value = getenv("XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT");
+    source = "XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT";
+    if ((!value || !value[0]) &&
+        xemu_headless_read_browser_fixture_setting(
+            "browser_boot_deterministic_warmup_progress_limit.txt",
+            file_value, sizeof(file_value))) {
+        value = file_value;
+        source = "browser_boot_deterministic_warmup_progress_limit.txt";
+    }
+
+    if (!value || !value[0]) {
+        return limit;
+    }
+
+    parsed = g_ascii_strtoll(value, &end, 10);
+    if (end == value || *end || parsed < 0) {
+        fprintf(stderr,
+                "Invalid %s='%s'; using 1 deterministic warmup event\n",
+                source, value);
+        return limit;
+    }
+
+    limit = parsed;
+    return limit;
+#else
+    return 1;
+#endif
+}
+
 static int64_t xemu_headless_browser_timer_pump_progress_limit(void)
 {
 #if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
@@ -197,12 +436,6 @@ static int64_t xemu_headless_browser_timer_pump_progress_limit(void)
     char file_value[64];
     const char *value;
     const char *source;
-    const char *dirs[] = {
-        "/xemu-fixtures",
-        "/xemu-smoke",
-        "/xemu-smoke-out",
-        NULL,
-    };
     char *end = NULL;
 
     if (initialized) {
@@ -213,31 +446,12 @@ static int64_t xemu_headless_browser_timer_pump_progress_limit(void)
     value = getenv("XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT");
     source = "XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT";
 
-    if (!value || !value[0]) {
-        for (int i = 0; dirs[i]; i++) {
-            char path[PATH_MAX];
-            FILE *fp;
-
-            snprintf(path, sizeof(path), "%s/%s", dirs[i],
-                     "browser_headless_timer_pump_progress_limit.txt");
-            fp = fopen(path, "r");
-            if (!fp) {
-                continue;
-            }
-
-            if (fgets(file_value, sizeof(file_value), fp)) {
-                file_value[strcspn(file_value, "\r\n")] = 0;
-            } else {
-                file_value[0] = 0;
-            }
-            fclose(fp);
-
-            if (file_value[0]) {
-                value = file_value;
-                source = "browser_headless_timer_pump_progress_limit.txt";
-                break;
-            }
-        }
+    if ((!value || !value[0]) &&
+        xemu_headless_read_browser_fixture_setting(
+            "browser_headless_timer_pump_progress_limit.txt", file_value,
+            sizeof(file_value))) {
+        value = file_value;
+        source = "browser_headless_timer_pump_progress_limit.txt";
     }
 
     if (!value || !value[0]) {
@@ -257,14 +471,6 @@ static int64_t xemu_headless_browser_timer_pump_progress_limit(void)
 #else
     return -1;
 #endif
-}
-
-static bool xemu_headless_browser_timer_pump_progress_budget_available(
-    uint64_t progress_events)
-{
-    int64_t limit = xemu_headless_browser_timer_pump_progress_limit();
-
-    return limit < 0 || progress_events < (uint64_t)limit;
 }
 
 static void xemu_headless_trace_browser_timer_pump_progress_limit(
@@ -295,6 +501,91 @@ static void xemu_headless_trace_browser_timer_pump_progress_limit(
 #endif
 }
 
+static void xemu_headless_trace_browser_deterministic_timer(
+    const char *phase,
+    const char *reason,
+    bool ready,
+    bool deterministic_ready,
+    bool progress,
+    uint64_t step_index,
+    uint64_t progress_events,
+    int64_t progress_limit,
+    uint64_t warmup_progress_events,
+    int64_t warmup_progress_limit,
+    int64_t virtual_now,
+    int64_t virtual_deadline,
+    bool virtual_has_timers,
+    bool virtual_expired)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static uint64_t seq;
+    int64_t virtual_deadline_delta = -1;
+
+    if (!xemu_boot_trace_enabled() ||
+        !xemu_headless_browser_boot_deterministic_enabled() || seq >= 64) {
+        return;
+    }
+
+    if (virtual_deadline >= 0) {
+        virtual_deadline_delta = virtual_deadline - virtual_now;
+    }
+
+    seq++;
+    fprintf(stderr,
+            "BOOT_MARK b6 deterministic=timer-pump"
+            " context=browser-runtime"
+            " seq=%llu"
+            " phase=%s"
+            " reason=%s"
+            " ready=%s"
+            " deterministic_ready=%s"
+            " entry_ready=%s"
+            " progress=%s"
+            " step_index=%llu"
+            " progress_events=%llu"
+            " progress_limit=%lld"
+            " warmup_progress_events=%llu"
+            " warmup_progress_limit=%lld"
+            " virtual_now=%lld"
+            " virtual_deadline=%lld"
+            " virtual_deadline_delta=%lld"
+            " virtual_has_timers=%s"
+            " virtual_expired=%s\n",
+            (unsigned long long)seq,
+            phase,
+            reason,
+            ready ? "yes" : "no",
+            deterministic_ready ? "yes" : "no",
+            xemu_headless_browser_timer_pump_poll_active() ? "yes" : "no",
+            progress ? "yes" : "no",
+            (unsigned long long)step_index,
+            (unsigned long long)progress_events,
+            (long long)progress_limit,
+            (unsigned long long)warmup_progress_events,
+            (long long)warmup_progress_limit,
+            (long long)virtual_now,
+            (long long)virtual_deadline,
+            (long long)virtual_deadline_delta,
+            virtual_has_timers ? "yes" : "no",
+            virtual_expired ? "yes" : "no");
+#else
+    (void)phase;
+    (void)reason;
+    (void)ready;
+    (void)deterministic_ready;
+    (void)progress;
+    (void)step_index;
+    (void)progress_events;
+    (void)progress_limit;
+    (void)warmup_progress_events;
+    (void)warmup_progress_limit;
+    (void)virtual_now;
+    (void)virtual_deadline;
+    (void)virtual_has_timers;
+    (void)virtual_expired;
+#endif
+}
+
 static void xemu_headless_trace_browser_timer_pump_step(const char *phase,
                                                         bool progress)
 {
@@ -321,10 +612,38 @@ static void xemu_headless_trace_browser_timer_pump_step(const char *phase,
 #endif
 }
 
+static void xemu_headless_trace_browser_timer_pump_step_count(
+    uint64_t step_limit,
+    bool deterministic)
+{
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    static uint64_t seq;
+
+    if (!xemu_boot_trace_enabled() || seq >= 8 || step_limit <= 1) {
+        return;
+    }
+
+    seq++;
+    fprintf(stderr,
+            "BOOT_MARK b6 headless=timer-pump-step-count"
+            " context=browser-runtime"
+            " seq=%llu"
+            " deterministic=%s"
+            " step_limit=%llu\n",
+            (unsigned long long)seq,
+            deterministic ? "yes" : "no",
+            (unsigned long long)step_limit);
+#else
+    (void)step_limit;
+    (void)deterministic;
+#endif
+}
+
 static void xemu_headless_pump_browser_timers(void)
 {
 #if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
     static uint64_t progress_events;
+    static uint64_t deterministic_warmup_progress_events;
     int64_t virtual_now_before;
     int64_t virtual_deadline_before;
     int64_t virtual_now_after;
@@ -335,15 +654,93 @@ static void xemu_headless_pump_browser_timers(void)
     bool virtual_expired_after;
     bool progress;
     bool ready = xemu_headless_browser_timer_pump_ready();
+    bool pcrtc_prestream_ready =
+        xemu_xbe_boot_trace_main_loop_timer_pump_pcrtc_prestream_ready();
+    bool deterministic = xemu_headless_browser_boot_deterministic_enabled();
+    bool deterministic_ready;
+    bool deterministic_warmup = false;
+    uint64_t deterministic_step_limit = 1;
+    int64_t progress_limit =
+        xemu_headless_browser_timer_pump_progress_limit();
+    int64_t warmup_progress_limit =
+        xemu_headless_browser_boot_deterministic_warmup_limit();
+    const char *source = "browser-headless-host-pump-bounded";
+    const char *ready_reason = "gate-ready";
 
     xemu_headless_trace_browser_timer_pump_gate(ready);
-    if (!ready) {
+    virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    virtual_deadline_before =
+        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+    virtual_has_timers_before = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+    virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+    xemu_xbe_boot_trace_observe_browser_timer_opportunity(
+        "headless-poll", ready, progress_events, progress_limit,
+        virtual_now_before, virtual_deadline_before,
+        virtual_has_timers_before, virtual_expired_before);
+
+    if (pcrtc_prestream_ready) {
+        source = "browser-deterministic-pcrtc-prestream";
+        ready_reason = "pcrtc-intr-clear-prestream";
+        if (!virtual_has_timers_before || !virtual_expired_before) {
+            xemu_headless_trace_browser_deterministic_timer(
+                "blocked", "pcrtc-prestream-no-expired-virtual-timer",
+                ready, false, false, 0, progress_events, progress_limit,
+                deterministic_warmup_progress_events, warmup_progress_limit,
+                virtual_now_before, virtual_deadline_before,
+                virtual_has_timers_before, virtual_expired_before);
+            return;
+        }
+    }
+
+    deterministic_ready = ready;
+    if (deterministic) {
+        deterministic_step_limit =
+            xemu_headless_browser_boot_deterministic_timer_steps();
+        if (!ready &&
+            xemu_headless_browser_timer_pump_poll_active() &&
+            virtual_has_timers_before && virtual_expired_before &&
+            (warmup_progress_limit < 0 ||
+             deterministic_warmup_progress_events <
+                 (uint64_t)warmup_progress_limit)) {
+            deterministic_ready = true;
+            deterministic_warmup = true;
+            source = "browser-deterministic-pump";
+            ready_reason = "deterministic-warmup-expired-entry-ready";
+        } else if (!deterministic_ready) {
+            if (warmup_progress_limit >= 0 &&
+                deterministic_warmup_progress_events >=
+                    (uint64_t)warmup_progress_limit) {
+                ready_reason = "deterministic-warmup-limit";
+            } else {
+                ready_reason = "deterministic-blocked";
+            }
+        }
+        xemu_headless_trace_browser_deterministic_timer(
+            "opportunity", ready_reason, ready, deterministic_ready, false,
+            0, progress_events, progress_limit,
+            deterministic_warmup_progress_events, warmup_progress_limit,
+            virtual_now_before, virtual_deadline_before,
+            virtual_has_timers_before, virtual_expired_before);
+    } else {
+        deterministic_step_limit =
+            xemu_headless_browser_boot_deterministic_timer_steps();
+        xemu_headless_trace_browser_timer_pump_step_count(
+            deterministic_step_limit, false);
+    }
+
+    if (!deterministic_ready) {
         return;
     }
 
-    if (!xemu_headless_browser_timer_pump_progress_budget_available(
-            progress_events)) {
+    if (!deterministic_warmup && progress_limit >= 0 &&
+        progress_events >= (uint64_t)progress_limit) {
         xemu_headless_trace_browser_timer_pump_progress_limit(progress_events);
+        xemu_headless_trace_browser_deterministic_timer(
+            "limit", "progress-limit", ready, deterministic_ready, false,
+            0, progress_events, progress_limit,
+            deterministic_warmup_progress_events, warmup_progress_limit,
+            virtual_now_before, virtual_deadline_before,
+            virtual_has_timers_before, virtual_expired_before);
         return;
     }
 
@@ -352,29 +749,90 @@ static void xemu_headless_pump_browser_timers(void)
         return;
     }
 
-    virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    virtual_deadline_before =
-        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
-    virtual_has_timers_before = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
-    virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
-    xemu_headless_trace_browser_timer_pump_step("before", false);
-    progress = qemu_clock_run_timers_with_attrs_limit(
-        QEMU_CLOCK_VIRTUAL, 0, 0, 1);
-    if (progress) {
-        progress_events++;
+    for (uint64_t step = 0; step < deterministic_step_limit; step++) {
+        if (step > 0) {
+            virtual_now_before = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            virtual_deadline_before = qemu_clock_deadline_ns_all(
+                QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+            virtual_has_timers_before =
+                qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+            virtual_expired_before = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+        }
+
+        if (deterministic_warmup && !virtual_expired_before) {
+            xemu_headless_trace_browser_deterministic_timer(
+                "stop", "no-expired-virtual-timer", ready,
+                deterministic_ready, false, step, progress_events,
+                progress_limit, deterministic_warmup_progress_events,
+                warmup_progress_limit, virtual_now_before,
+                virtual_deadline_before,
+                virtual_has_timers_before, virtual_expired_before);
+            break;
+        }
+        if (!deterministic_warmup && progress_limit >= 0 &&
+            progress_events >= (uint64_t)progress_limit) {
+            xemu_headless_trace_browser_timer_pump_progress_limit(
+                progress_events);
+            xemu_headless_trace_browser_deterministic_timer(
+                "limit", "progress-limit", ready, deterministic_ready, false,
+                step, progress_events, progress_limit,
+                deterministic_warmup_progress_events, warmup_progress_limit,
+                virtual_now_before, virtual_deadline_before,
+                virtual_has_timers_before,
+                virtual_expired_before);
+            break;
+        }
+
+        if (deterministic_warmup && warmup_progress_limit >= 0 &&
+            deterministic_warmup_progress_events >=
+                (uint64_t)warmup_progress_limit) {
+            xemu_headless_trace_browser_deterministic_timer(
+                "limit", "warmup-progress-limit", ready,
+                deterministic_ready, false, step, progress_events,
+                progress_limit, deterministic_warmup_progress_events,
+                warmup_progress_limit, virtual_now_before,
+                virtual_deadline_before, virtual_has_timers_before,
+                virtual_expired_before);
+            break;
+        }
+        xemu_headless_trace_browser_timer_pump_step("before", false);
+        xemu_headless_trace_browser_deterministic_timer(
+            "before", ready_reason, ready, deterministic_ready, false, step,
+            progress_events, progress_limit, deterministic_warmup_progress_events,
+            warmup_progress_limit, virtual_now_before,
+            virtual_deadline_before, virtual_has_timers_before,
+            virtual_expired_before);
+        progress = qemu_clock_run_timers_with_attrs_limit(
+            QEMU_CLOCK_VIRTUAL, 0, 0, 1);
+        if (progress) {
+            if (deterministic_warmup) {
+                deterministic_warmup_progress_events++;
+            } else {
+                progress_events++;
+            }
+        }
+        xemu_headless_trace_browser_timer_pump_step("after", progress);
+        virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        virtual_deadline_after = qemu_clock_deadline_ns_all(
+            QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
+        virtual_has_timers_after = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
+        virtual_expired_after = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
+        xemu_headless_trace_browser_deterministic_timer(
+            "after", ready_reason, ready, deterministic_ready, progress, step,
+            progress_events, progress_limit, deterministic_warmup_progress_events,
+            warmup_progress_limit, virtual_now_after,
+            virtual_deadline_after, virtual_has_timers_after,
+            virtual_expired_after);
+        xemu_xbe_boot_trace_observe_main_loop_timers(
+            source, 0, 0, virtual_now_before, virtual_deadline_before,
+            virtual_has_timers_before, virtual_expired_before, progress,
+            virtual_now_after, virtual_deadline_after,
+            virtual_has_timers_after, virtual_expired_after);
+
+        if (deterministic_warmup && !progress) {
+            break;
+        }
     }
-    xemu_headless_trace_browser_timer_pump_step("after", progress);
-    virtual_now_after = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    virtual_deadline_after =
-        qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL, QEMU_TIMER_ATTR_ALL);
-    virtual_has_timers_after = qemu_clock_has_timers(QEMU_CLOCK_VIRTUAL);
-    virtual_expired_after = qemu_clock_expired(QEMU_CLOCK_VIRTUAL);
-    xemu_xbe_boot_trace_observe_main_loop_timers(
-        "browser-headless-host-pump-bounded",
-        0, 0, virtual_now_before, virtual_deadline_before,
-        virtual_has_timers_before, virtual_expired_before, progress,
-        virtual_now_after, virtual_deadline_after, virtual_has_timers_after,
-        virtual_expired_after);
     bql_unlock();
 #endif
 }
@@ -438,10 +896,18 @@ static void xemu_headless_vblank_stop(void)
 
 static void *qemu_main_thread(void *opaque)
 {
+    static bool started_emitted;
+    static bool qemu_main_loop_started_emitted;
+
+    xemu_call_chain_trace_once(&started_emitted, "started",
+                               "qemu_main_thread");
     xemu_boot_trace_mark("b0 thread=qemu-main started");
     qemu_init(g_argc, g_argv);
     xemu_headless_vblank_start();
+    xemu_call_chain_trace_once(&qemu_main_loop_started_emitted, "started",
+                               "qemu_main_loop");
     exit_status = qemu_main_loop();
+    xemu_call_chain_trace("ended", "qemu_main_loop");
     if (xemu_boot_trace_enabled()) {
         fprintf(stderr, "BOOT_MARK b3 runstate=main-loop-return exit=%d\n",
                 exit_status);
@@ -457,6 +923,7 @@ static void *qemu_main_thread(void *opaque)
     qemu_cleanup(exit_status);
     bql_unlock();
 
+    xemu_call_chain_trace("ended", "qemu_main_thread");
     return NULL;
 }
 
@@ -496,9 +963,12 @@ static void parse_xemu_args(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    static bool started_emitted;
     int64_t timeout_ms;
     int64_t start_us;
     const char *reason = "shutdown";
+
+    xemu_call_chain_trace_once(&started_emitted, "started", "main");
 
     setlocale(LC_NUMERIC, "C");
 
@@ -551,5 +1021,6 @@ int main(int argc, char **argv)
             reason,
             (long long)((g_get_monotonic_time() - start_us) / 1000),
             exit_status);
+    xemu_call_chain_trace("ended", "main");
     return exit_status;
 }

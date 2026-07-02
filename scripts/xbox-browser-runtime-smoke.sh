@@ -55,6 +55,21 @@ Controls:
                                   Optional B6 browser PIT IRQ timer trace limit.
   XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT
                                   Optional B6 browser main-loop timer trace limit.
+  XEMU_BOOT_TRACE_XBE_TIMER_OPPORTUNITY_LIMIT
+                                  Optional B6 browser timer-opportunity trace limit.
+  XEMU_BOOT_TRACE_XBE_EDGE_DECISION_LIMIT
+                                  Optional B6 browser post-idle edge-decision
+                                  trace limit.
+  XEMU_BOOT_TRACE_XBE_TICK_BLOCK_LIMIT
+                                  Optional B6 watched-word tick-block
+                                  completion trace limit.
+  XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER
+                                  Optional B6 browser-only diagnostic that
+                                  lets the watched-word tick block execute
+                                  once before a pending hard IRQ is serviced.
+  XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER_LIMIT
+                                  Optional trace limit for the tick-block IRQ
+                                  defer diagnostic.
   XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT
                                   Optional B6 browser-headless host timer pump
                                   progress cap. Diagnostic only; default is
@@ -68,6 +83,19 @@ Controls:
                                   Diagnostic only; default preserves current
                                   XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY
                                   behavior.
+  XEMU_BROWSER_BOOT_DETERMINISTIC Optional browser-only deterministic boot
+                                  scheduler mode. Diagnostic only; default is
+                                  disabled.
+  XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS
+                                  Optional per-host-poll virtual timer step
+                                  count for deterministic mode. Default: 1.
+  XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT
+                                  Optional pre-ready deterministic progress
+                                  cap. Default: 1.
+  XEMU_BROWSER_BOOT_DETERMINISTIC_PCRTC_PRESTREAM
+                                  Optional final PFIFO-window PCRTC pre-stream
+                                  deterministic gate. Diagnostic only; default
+                                  is disabled.
   XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT
                                   Optional B6 browser kernel-loop trace limit.
   XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT
@@ -85,6 +113,10 @@ Controls:
                                   Optional B6 memory-watch callback access
                                   filter: all/read/write, or off. Default
                                   leaves only cheap sampled fields.
+  XEMU_BOOT_TRACE_NV2A_USER_DMA_PUT_LIMIT
+                                  Optional capped NV_USER_DMA_PUT observer
+                                  limit. Browser writes this to the fixture
+                                  file consumed by the deferred observer.
   XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_INTERVAL
                                   Optional B6 browser TCG timer pump interval,
                                   in translated blocks. Default: disabled.
@@ -113,6 +145,7 @@ Controls:
   XEMU_BOOT_TRACE_XBE_IRQ_WATCH   Optional comma-separated PIC IRQs whose
                                   B6 PIC/LPC markers bypass the PFIFO-empty
                                   logging gate.
+  XEMU_BOOT_TRACE_CALL_CHAIN      Optional broad call-chain trace flag.
   XEMU_FLASH, XEMU_HDD            Required in real mode unless auto-discovered.
   XEMU_MCPX, XEMU_EEPROM, XEMU_DVD
                                   Optional real mode assets.
@@ -303,22 +336,36 @@ const traceOptions = {
   xbeIretLimit: process.env.XEMU_BOOT_TRACE_XBE_IRET_LIMIT || "",
   xbePitIrqLimit: process.env.XEMU_BOOT_TRACE_XBE_PIT_IRQ_LIMIT || "",
   xbeMainLoopTimerLimit: process.env.XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT || "",
+  xbeTimerOpportunityLimit: process.env.XEMU_BOOT_TRACE_XBE_TIMER_OPPORTUNITY_LIMIT || "",
+  xbeEdgeDecisionLimit: process.env.XEMU_BOOT_TRACE_XBE_EDGE_DECISION_LIMIT || "",
+  xbeTickBlockLimit: process.env.XEMU_BOOT_TRACE_XBE_TICK_BLOCK_LIMIT || "",
+  xbeTickBlockIrqDefer: process.env.XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER || "",
+  xbeTickBlockIrqDeferLimit: process.env.XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER_LIMIT || "",
   browserHeadlessTimerPumpProgressLimit:
     process.env.XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT || "",
   browserHeadlessTimerPumpMode:
     process.env.XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_MODE || "",
+  browserBootDeterministic: process.env.XEMU_BROWSER_BOOT_DETERMINISTIC || "",
+  browserBootDeterministicTimerSteps:
+    process.env.XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS || "",
+  browserBootDeterministicWarmupProgressLimit:
+    process.env.XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT || "",
+  browserBootDeterministicPcrtcPrestream:
+    process.env.XEMU_BROWSER_BOOT_DETERMINISTIC_PCRTC_PRESTREAM || "",
   xbeKernelLoopLimit: process.env.XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT || "",
   xbeKernelLoopAfterIdleLimit: process.env.XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT || "",
   xbeKernelLoopMinHits: process.env.XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS || "",
   xbeMemoryWatchPhys: process.env.XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_PHYS || "",
   xbeMemoryWatchLimit: process.env.XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_LIMIT || "",
   xbeMemoryWatchAccess: process.env.XEMU_BOOT_TRACE_XBE_MEMORY_WATCH_ACCESS || "",
+  nv2aUserDmaPutLimit: process.env.XEMU_BOOT_TRACE_NV2A_USER_DMA_PUT_LIMIT || "",
   xbeTcgTimerPumpInterval: process.env.XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_INTERVAL || "",
   xbeTcgTimerPumpAfterIdleLimit: process.env.XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_AFTER_IDLE_LIMIT || "",
   xbeTcgTimerPumpMode: process.env.XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE || "",
   xbeIdleBeforePfifoTransitionLimit: process.env.XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT || "",
   xbeIrqAfterPfifoEmptyOnly: process.env.XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY || "",
   xbeIrqWatch: process.env.XEMU_BOOT_TRACE_XBE_IRQ_WATCH || "",
+  callChainTrace: process.env.XEMU_BOOT_TRACE_CALL_CHAIN || "",
 };
 const assetPaths = {
   flash: process.env.XEMU_FLASH || "",
@@ -598,22 +645,32 @@ try {
     `trace_xbe_pic_irq_limit=${traceOptions.xbePicIrqLimit || "default"}`,
     `trace_xbe_cpu_hard_irq_limit=${traceOptions.xbeCpuHardIrqLimit || "default"}`,
     `trace_xbe_iret_limit=${traceOptions.xbeIretLimit || "default"}`,
-    `trace_xbe_pit_irq_limit=${traceOptions.xbePitIrqLimit || "default"}`,
-    `trace_xbe_main_loop_timer_limit=${traceOptions.xbeMainLoopTimerLimit || "default"}`,
-    `browser_headless_timer_pump_progress_limit=${traceOptions.browserHeadlessTimerPumpProgressLimit || "default"}`,
+      `trace_xbe_pit_irq_limit=${traceOptions.xbePitIrqLimit || "default"}`,
+      `trace_xbe_main_loop_timer_limit=${traceOptions.xbeMainLoopTimerLimit || "default"}`,
+      `trace_xbe_timer_opportunity_limit=${traceOptions.xbeTimerOpportunityLimit || "default"}`,
+      `trace_xbe_tick_block_limit=${traceOptions.xbeTickBlockLimit || "default"}`,
+      `trace_xbe_tick_block_irq_defer=${traceOptions.xbeTickBlockIrqDefer || "default"}`,
+      `trace_xbe_tick_block_irq_defer_limit=${traceOptions.xbeTickBlockIrqDeferLimit || "default"}`,
+      `browser_headless_timer_pump_progress_limit=${traceOptions.browserHeadlessTimerPumpProgressLimit || "default"}`,
     `browser_headless_timer_pump_mode=${traceOptions.browserHeadlessTimerPumpMode || "default"}`,
+    `browser_boot_deterministic=${traceOptions.browserBootDeterministic || "default"}`,
+    `browser_boot_deterministic_timer_steps=${traceOptions.browserBootDeterministicTimerSteps || "default"}`,
+    `browser_boot_deterministic_warmup_progress_limit=${traceOptions.browserBootDeterministicWarmupProgressLimit || "default"}`,
+    `browser_boot_deterministic_pcrtc_prestream=${traceOptions.browserBootDeterministicPcrtcPrestream || "default"}`,
     `trace_xbe_kernel_loop_limit=${traceOptions.xbeKernelLoopLimit || "default"}`,
     `trace_xbe_kernel_loop_after_idle_limit=${traceOptions.xbeKernelLoopAfterIdleLimit || "default"}`,
     `trace_xbe_kernel_loop_min_hits=${traceOptions.xbeKernelLoopMinHits || "default"}`,
     `trace_xbe_memory_watch_phys=${traceOptions.xbeMemoryWatchPhys || "default"}`,
     `trace_xbe_memory_watch_limit=${traceOptions.xbeMemoryWatchLimit || "default"}`,
     `trace_xbe_memory_watch_access=${traceOptions.xbeMemoryWatchAccess || "default"}`,
+    `trace_nv2a_user_dma_put_limit=${traceOptions.nv2aUserDmaPutLimit || "default"}`,
     `trace_xbe_tcg_timer_pump_interval=${traceOptions.xbeTcgTimerPumpInterval || "default"}`,
     `trace_xbe_tcg_timer_pump_after_idle_limit=${traceOptions.xbeTcgTimerPumpAfterIdleLimit || "default"}`,
     `trace_xbe_tcg_timer_pump_mode=${traceOptions.xbeTcgTimerPumpMode || "default"}`,
     `trace_xbe_idle_before_pfifo_transition_limit=${traceOptions.xbeIdleBeforePfifoTransitionLimit || "default"}`,
     `trace_xbe_irq_after_pfifo_empty_only=${traceOptions.xbeIrqAfterPfifoEmptyOnly || "default"}`,
     `trace_xbe_irq_watch=${traceOptions.xbeIrqWatch || "default"}`,
+    `trace_call_chain=${traceOptions.callChainTrace || "default"}`,
     `b4_marker=${b4Marker ? "yes" : "no"}`,
     `display_capture=${displayCapture ? "yes" : "no"}`,
   ].join(" "));
@@ -636,22 +693,32 @@ try {
     `trace_xbe_pic_irq_limit=${traceOptions.xbePicIrqLimit || "default"}`,
     `trace_xbe_cpu_hard_irq_limit=${traceOptions.xbeCpuHardIrqLimit || "default"}`,
     `trace_xbe_iret_limit=${traceOptions.xbeIretLimit || "default"}`,
-    `trace_xbe_pit_irq_limit=${traceOptions.xbePitIrqLimit || "default"}`,
+      `trace_xbe_pit_irq_limit=${traceOptions.xbePitIrqLimit || "default"}`,
       `trace_xbe_main_loop_timer_limit=${traceOptions.xbeMainLoopTimerLimit || "default"}`,
+      `trace_xbe_timer_opportunity_limit=${traceOptions.xbeTimerOpportunityLimit || "default"}`,
+      `trace_xbe_tick_block_limit=${traceOptions.xbeTickBlockLimit || "default"}`,
+      `trace_xbe_tick_block_irq_defer=${traceOptions.xbeTickBlockIrqDefer || "default"}`,
+      `trace_xbe_tick_block_irq_defer_limit=${traceOptions.xbeTickBlockIrqDeferLimit || "default"}`,
       `browser_headless_timer_pump_progress_limit=${traceOptions.browserHeadlessTimerPumpProgressLimit || "default"}`,
       `browser_headless_timer_pump_mode=${traceOptions.browserHeadlessTimerPumpMode || "default"}`,
+      `browser_boot_deterministic=${traceOptions.browserBootDeterministic || "default"}`,
+      `browser_boot_deterministic_timer_steps=${traceOptions.browserBootDeterministicTimerSteps || "default"}`,
+      `browser_boot_deterministic_warmup_progress_limit=${traceOptions.browserBootDeterministicWarmupProgressLimit || "default"}`,
+      `browser_boot_deterministic_pcrtc_prestream=${traceOptions.browserBootDeterministicPcrtcPrestream || "default"}`,
       `trace_xbe_kernel_loop_limit=${traceOptions.xbeKernelLoopLimit || "default"}`,
     `trace_xbe_kernel_loop_after_idle_limit=${traceOptions.xbeKernelLoopAfterIdleLimit || "default"}`,
     `trace_xbe_kernel_loop_min_hits=${traceOptions.xbeKernelLoopMinHits || "default"}`,
     `trace_xbe_memory_watch_phys=${traceOptions.xbeMemoryWatchPhys || "default"}`,
     `trace_xbe_memory_watch_limit=${traceOptions.xbeMemoryWatchLimit || "default"}`,
     `trace_xbe_memory_watch_access=${traceOptions.xbeMemoryWatchAccess || "default"}`,
+    `trace_nv2a_user_dma_put_limit=${traceOptions.nv2aUserDmaPutLimit || "default"}`,
     `trace_xbe_tcg_timer_pump_interval=${traceOptions.xbeTcgTimerPumpInterval || "default"}`,
     `trace_xbe_tcg_timer_pump_after_idle_limit=${traceOptions.xbeTcgTimerPumpAfterIdleLimit || "default"}`,
     `trace_xbe_tcg_timer_pump_mode=${traceOptions.xbeTcgTimerPumpMode || "default"}`,
     `trace_xbe_idle_before_pfifo_transition_limit=${traceOptions.xbeIdleBeforePfifoTransitionLimit || "default"}`,
     `trace_xbe_irq_after_pfifo_empty_only=${traceOptions.xbeIrqAfterPfifoEmptyOnly || "default"}`,
     `trace_xbe_irq_watch=${traceOptions.xbeIrqWatch || "default"}`,
+    `trace_call_chain=${traceOptions.callChainTrace || "default"}`,
     `b3=${runtimeMode === "real" && expectB3 ? "required" : "not-required"}`,
     `boot_result=${resultMatch[1]}`,
   ].join(" "));
@@ -693,8 +760,17 @@ XEMU_BOOT_TRACE_XBE_CPU_HARD_IRQ_LIMIT="${XEMU_BOOT_TRACE_XBE_CPU_HARD_IRQ_LIMIT
 XEMU_BOOT_TRACE_XBE_IRET_LIMIT="${XEMU_BOOT_TRACE_XBE_IRET_LIMIT:-}" \
 XEMU_BOOT_TRACE_XBE_PIT_IRQ_LIMIT="${XEMU_BOOT_TRACE_XBE_PIT_IRQ_LIMIT:-}" \
 XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT="${XEMU_BOOT_TRACE_XBE_MAIN_LOOP_TIMER_LIMIT:-}" \
+XEMU_BOOT_TRACE_XBE_TIMER_OPPORTUNITY_LIMIT="${XEMU_BOOT_TRACE_XBE_TIMER_OPPORTUNITY_LIMIT:-}" \
+XEMU_BOOT_TRACE_XBE_EDGE_DECISION_LIMIT="${XEMU_BOOT_TRACE_XBE_EDGE_DECISION_LIMIT:-}" \
+XEMU_BOOT_TRACE_XBE_TICK_BLOCK_LIMIT="${XEMU_BOOT_TRACE_XBE_TICK_BLOCK_LIMIT:-}" \
+XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER="${XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER:-}" \
+XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER_LIMIT="${XEMU_BOOT_TRACE_XBE_TICK_BLOCK_IRQ_DEFER_LIMIT:-}" \
 XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT="${XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_PROGRESS_LIMIT:-}" \
 XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_MODE="${XEMU_BROWSER_BOOT_HEADLESS_TIMER_PUMP_MODE:-}" \
+XEMU_BROWSER_BOOT_DETERMINISTIC="${XEMU_BROWSER_BOOT_DETERMINISTIC:-}" \
+XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS="${XEMU_BROWSER_BOOT_DETERMINISTIC_TIMER_STEPS:-}" \
+XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT="${XEMU_BROWSER_BOOT_DETERMINISTIC_WARMUP_PROGRESS_LIMIT:-}" \
+XEMU_BROWSER_BOOT_DETERMINISTIC_PCRTC_PRESTREAM="${XEMU_BROWSER_BOOT_DETERMINISTIC_PCRTC_PRESTREAM:-}" \
 XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT="${XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_LIMIT:-}" \
 XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT="${XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_AFTER_IDLE_LIMIT:-}" \
 XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS="${XEMU_BOOT_TRACE_XBE_KERNEL_LOOP_MIN_HITS:-}" \
@@ -707,6 +783,7 @@ XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MODE="${XEMU_BOOT_TRACE_XBE_TCG_TIMER_PUMP_MO
 XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT="${XEMU_BOOT_TRACE_XBE_IDLE_BEFORE_PFIFO_TRANSITION_LIMIT:-}" \
 XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY="${XEMU_BOOT_TRACE_XBE_IRQ_AFTER_PFIFO_EMPTY_ONLY:-}" \
 XEMU_BOOT_TRACE_XBE_IRQ_WATCH="${XEMU_BOOT_TRACE_XBE_IRQ_WATCH:-}" \
+XEMU_BOOT_TRACE_CALL_CHAIN="${XEMU_BOOT_TRACE_CALL_CHAIN:-}" \
 XEMU_FLASH="${XEMU_FLASH:-}" \
 XEMU_MCPX="${XEMU_MCPX:-}" \
 XEMU_EEPROM="${XEMU_EEPROM:-}" \

@@ -59,6 +59,10 @@ contract; do not use older diagnostic history here to override `goal.md`.
 Every experiment/run should also produce a numbered markdown write-up under
 `history/` using the template there, so the project keeps an auditable trail of
 purpose, findings, and follow-up decisions.
+Immediately after any new numbered history markdown file is written, run the
+bounded sub-agent loop check from `goal.md` before the next experiment/run/probe
+or code change. The only exemption is the critique or loop-check history entry
+created by that checkpoint, which does not recursively trigger another check.
 If progress stalls or the next run would repeat a historical/negative-control
 path, use the independent critique checkpoint defined in `goal.md`: ask a
 highest-reasoning sub-agent, preferably `gpt-5.5` with `xhigh` reasoning, to

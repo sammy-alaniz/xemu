@@ -119,7 +119,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         if (!(pg->pending_interrupts & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
             pg->waiting_for_context_switch = false;
         }
-        pfifo_kick(d);
+        pfifo_kick_with_source(d, "pgraph-intr-clear");
         nv2a_update_irq(d);
         pgraph_boot_trace_notify_clear(d, val, pending_before,
                                        enabled_before, waiting_nop_before,
@@ -143,7 +143,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                         % PG_GET_MASK(NV_PGRAPH_SURFACE,
                                    NV_PGRAPH_SURFACE_MODULO_3D) );
             nv2a_profile_increment();
-            pfifo_kick(d);
+            pfifo_kick_with_source(d, "pgraph-increment-read3d");
         }
         break;
     case NV_PGRAPH_RDI_DATA: {
@@ -198,7 +198,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     // events
     switch (addr) {
     case NV_PGRAPH_FIFO:
-        pfifo_kick(d);
+        pfifo_kick_with_source(d, "pgraph-fifo-write");
         break;
     }
 
@@ -3915,7 +3915,7 @@ static void do_wait_for_renderer_switch(CPUState *cpu, run_on_cpu_data data)
 
     qemu_mutex_lock(&d->pfifo.lock);
     d->pgraph.renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_CPU_WAITING;
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, "pgraph-renderer-switch");
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.renderer_switch_complete);
 }

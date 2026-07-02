@@ -30,10 +30,28 @@ Current long-term goal:
   native execution/reference capture are solved by
   `native-headless-graphic-update-v2`. The remaining blocker is browser-side
   post-idle/post-service CPU flow, narrowed to pre-service tick accumulation:
-  native reaches the shared `0x0003a890` poll with 136 tick units, the current
-  ready-edge browser reaches the same useful edge with 1 tick, and browser is
-  already behind before its first watched read at
-  `0x80014f32->0x80030e84`.
+  native reaches the shared `0x0003a890` poll with 136 tick units while the
+  current browser first watched read is still 0 ticks at
+  `0x80014f32->0x80030e84`. The current timer-opportunity gate-split artifact
+  proves expired browser timer work exists before PFIFO stream-idle, but all
+  sampled opportunities are blocked by
+  `pfifo_empty_blocker=wait-source-not-pfifo-window`. The wait-snapshot
+  comparator then proves no PFIFO-window publication exists before those
+  opportunities, and the PFIFO-window publication classifier proves PFIFO
+  production itself starts after the opportunity window, with publication later
+  gated until `dma_get=0x03880e00`. The PFIFO pusher-entry classifier proves no
+  pusher event occurs before opportunity line 1162 and first enters the pusher
+  after the opportunity window with open entry gates and DMA pending. The PFIFO
+  scheduler diagnostic sharpens that further:
+  `build-real-b3-matrix/browser-memory-watch-write-0x3a890-ready-edge-host4-pfifo-scheduler-v1/browser-runtime.log`
+  has `scheduler_events_before_first_opportunity=0`,
+  `kick_events_before_first_opportunity=0`, and first post-opportunity
+  scheduler event `op=kick` at line 1385. The next target is kick-source
+  provenance with source-tagged `pfifo=scheduler` markers:
+  `kick_sources_before_first_opportunity` and
+  `first_kick_after_last_opportunity_source`. Do not rerun scheduler, pusher,
+  PFIFO-window, timer-opportunity, B3/B4/B5, or broad pump/vblank/precommit
+  diagnostics unless the source-tagged marker changes this boundary.
 - Loop-control rule: before starting a new run, probe, or code change, state the
   one new field it can change or explain. Do not rerun known-good B3/B4/B5,
   section-map, native-reference, or known-negative pump/vblank/precommit probes
@@ -44,7 +62,18 @@ Current long-term goal:
   decision, and next step. Keep `history/0-template.md` as the template and do
   not count it as a run. Do not start another run before writing the previous
   history entry unless the run produced no useful artifact; if the failure
-  changes the next action, write the failed-run entry too.
+  changes the next action, write the failed-run entry too. Immediately after
+  writing any new numbered markdown file in `history/`, run a bounded sub-agent
+  loop check before starting any next experiment, run, probe, or code change.
+  This applies to static summaries, failed-run summaries, helper-output
+  summaries, and runtime experiments. The only exemption is the critique or
+  loop-check history entry produced by that checkpoint; it should be written as
+  the next numbered `history/` file and does not recursively require another
+  sub-agent check. Every sub-agent loop check must include a concise
+  `Progress-Method Critique` section that says whether the current method is
+  still moving toward strict dashboard execution, visible main-menu proof, and
+  game launch; whether the work is becoming too diagnostic-heavy or rerun-heavy;
+  and one process adjustment for the next 2-3 turns.
 - Independent critique checkpoint: when two consecutive experiments fail to
   improve/explain the primary metric, when a run would repeat a historical or
   negative-control mode, when scope would broaden back to old B3/B4/B5 or
@@ -52,7 +81,8 @@ Current long-term goal:
   weakened, spawn a highest-reasoning sub-agent for critique. Prefer `gpt-5.5`
   with `xhigh` reasoning when available. Use the exact prompt shape in
   `goal.md`. The sub-agent should not edit files unless explicitly given a
-  disjoint write scope, and its critique must end in one decision: continue,
+  disjoint write scope, and its critique must include the `Progress-Method
+  Critique` section required by `goal.md` and end in one decision: continue,
   revise, or stop. Treat the checkpoint as single-shot per trigger: run or
   reject one concrete next step after the critique, write one `history/` entry,
   and do not recursively spawn critique agents unless a human asks.
@@ -60,7 +90,35 @@ Current long-term goal:
   as the stable B5-pass/read-proof browser baseline, not the front-most B6 CPU
   diagnostic. Treat
   `build-real-b3-matrix/browser-memory-watch-write-0x3a890-ready-edge-host4-v1-combined.log`
-  as the active browser B6 diagnostic. Treat
+  as the fuller browser CPU-flow baseline. Treat
+  `build-real-b3-matrix/browser-memory-watch-write-0x3a890-ready-edge-host4-timer-opportunity-gate-split-v1/browser-runtime.log`
+  as the focused timer-opportunity diagnostic: it proves browser-side
+  `xbe_timer_opportunity_limit=8` plumbing, B4/B5, section-map, first watched
+  read at 0 ticks, and 8 expired pre-stream opportunities blocked by
+  `pfifo_empty_blocker=wait-source-not-pfifo-window`. Treat
+  `scripts/xbox-timer-opportunity-wait-snapshot-compare.py` as the focused
+  static companion: it reports
+  `divergence=no-pfifo-window-published-before-opportunities`,
+  `opportunities_with_previous_pfifo=0`,
+  `opportunities_with_next_pfifo=8`, and first later PFIFO publication at line
+  1884. Treat `scripts/xbox-pfifo-window-publication-classify.py` as the
+  follow-on static classifier: it should report whether PFIFO production starts
+  only after the opportunity window, whether the last non-window PFIFO producer
+  is blocked by `dma-get-before-window-start`, and whether the first publication
+  is caused by `window-start-reached`. Treat
+  `scripts/xbox-pfifo-pusher-entry-classify.py` as the pusher-entry ordering
+  classifier: it reports
+  `last_pusher_not_entered_reason_before_first_opportunity=not-called-before-first-opportunity`
+  by source/static marker contract and `first_pusher_enter_reason` as
+  `entry-gates-open-with-dma-pending`. Treat
+  `scripts/xbox-pfifo-scheduler-state-classify.py` as the current focused
+  diagnostic reducer for `BOOT_MARK b6 pfifo=scheduler` markers. The current
+  scheduler artifact reports
+  `divergence=no-pfifo-scheduler-event-before-first-opportunity`,
+  `kick_sources_before_first_opportunity=none`, and first post-opportunity kick
+  source `none` because call sites were not yet source-tagged. The next
+  actionable run must populate `first_kick_after_last_opportunity_source`
+  without remeasuring pusher call/skip ambiguity. Treat
   `build-real-b3-matrix/native-headless-graphic-update-v2/boot-smoke.log` as the
   native execution/reference baseline.
 - The primary progress metric is moving

@@ -856,6 +856,68 @@ static bool nv2a_browser_read_pcrtc_vblank_mode_file(char *buffer,
     return false;
 }
 
+static bool nv2a_browser_read_fixture_setting(const char *file_name,
+                                              char *buffer,
+                                              size_t buffer_len)
+{
+    const char *dirs[] = {
+        "/xemu-fixtures",
+        "/xemu-smoke",
+        "/xemu-smoke-out",
+        NULL,
+    };
+
+    for (int i = 0; dirs[i]; i++) {
+        char path[PATH_MAX];
+        FILE *fp;
+
+        snprintf(path, sizeof(path), "%s/%s", dirs[i], file_name);
+        fp = fopen(path, "r");
+        if (!fp) {
+            continue;
+        }
+
+        if (fgets(buffer, buffer_len, fp)) {
+            fclose(fp);
+            buffer[strcspn(buffer, "\r\n")] = 0;
+            return buffer[0] != 0;
+        }
+        fclose(fp);
+    }
+
+    return false;
+}
+
+static uint64_t nv2a_browser_deterministic_pcrtc_prestream_raise_count;
+
+static bool nv2a_browser_deterministic_pcrtc_prestream_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+    const char *value;
+    char file_value[64];
+
+    if (initialized) {
+        return enabled;
+    }
+    initialized = true;
+
+    value = getenv("XEMU_BROWSER_BOOT_DETERMINISTIC_PCRTC_PRESTREAM");
+    if ((!value || !value[0]) &&
+        nv2a_browser_read_fixture_setting(
+            "browser_boot_deterministic_pcrtc_prestream.txt",
+            file_value, sizeof(file_value))) {
+        value = file_value;
+    }
+
+    enabled = value && value[0] &&
+              g_ascii_strcasecmp(value, "0") &&
+              g_ascii_strcasecmp(value, "false") &&
+              g_ascii_strcasecmp(value, "no") &&
+              g_ascii_strcasecmp(value, "off");
+    return enabled;
+}
+
 static XemuBrowserPcrtcVblankMode nv2a_browser_pcrtc_vblank_mode(void)
 {
     static bool initialized;
@@ -890,9 +952,53 @@ static XemuBrowserPcrtcVblankMode nv2a_browser_pcrtc_vblank_mode(void)
     return mode;
 }
 
-static bool nv2a_browser_pcrtc_vblank_should_raise(const char **reason)
+static const char *nv2a_browser_deterministic_pcrtc_prestream_blocker(
+    NV2AState *d)
+{
+    if (!nv2a_browser_deterministic_pcrtc_prestream_enabled()) {
+        return "deterministic-prestream-disabled";
+    }
+    if (!xemu_xbe_boot_trace_dashboard_observed()) {
+        return "dashboard-not-observed";
+    }
+    if (!xemu_xbe_boot_trace_entry_ready()) {
+        return "entry-not-ready";
+    }
+    if (xemu_xbe_boot_trace_pfifo_stream_idle_transition_observed()) {
+        return "stream-idle-observed";
+    }
+    if (!(d->pcrtc.enabled_interrupts & NV_PCRTC_INTR_0_VBLANK)) {
+        return "pcrtc-vblank-disabled";
+    }
+    if (d->pcrtc.pending_interrupts & NV_PCRTC_INTR_0_VBLANK) {
+        return "pcrtc-vblank-pending";
+    }
+    if (nv2a_browser_deterministic_pcrtc_prestream_raise_count >= 1) {
+        return "deterministic-prestream-limit";
+    }
+
+    return NULL;
+}
+
+static bool nv2a_browser_deterministic_pcrtc_prestream_controls(void)
+{
+    return nv2a_browser_deterministic_pcrtc_prestream_enabled() &&
+           xemu_xbe_boot_trace_dashboard_observed() &&
+           xemu_xbe_boot_trace_entry_ready() &&
+           !xemu_xbe_boot_trace_pfifo_stream_idle_transition_observed();
+}
+
+static bool nv2a_browser_pcrtc_vblank_should_raise(NV2AState *d,
+                                                   const char **reason)
 {
     XemuBrowserPcrtcVblankMode mode = nv2a_browser_pcrtc_vblank_mode();
+
+    (void)d;
+
+    if (nv2a_browser_deterministic_pcrtc_prestream_controls()) {
+        *reason = "deterministic-prestream-wait-final-window";
+        return false;
+    }
 
     switch (mode) {
     case XEMU_BROWSER_PCRTC_VBLANK_OFF:
@@ -928,7 +1034,8 @@ static void nv2a_browser_trace_pcrtc_vblank_gate(NV2AState *d,
     uint64_t count;
     XemuBrowserPcrtcVblankMode mode = nv2a_browser_pcrtc_vblank_mode();
 
-    if (mode == XEMU_BROWSER_PCRTC_VBLANK_NORMAL ||
+    if ((mode == XEMU_BROWSER_PCRTC_VBLANK_NORMAL &&
+         !nv2a_browser_deterministic_pcrtc_prestream_enabled()) ||
         !nv2a_boot_trace_enabled() ||
         !xemu_xbe_boot_trace_dashboard_observed()) {
         return;
@@ -986,6 +1093,135 @@ static void nv2a_browser_trace_pcrtc_vblank_gate(NV2AState *d,
             d->pcrtc.pending_interrupts, d->pcrtc.enabled_interrupts,
             xemu_xbe_boot_trace_entry_ready() ? "yes" : "no",
             xemu_xbe_boot_trace_dashboard_observed() ? "yes" : "no");
+}
+
+static void nv2a_browser_trace_pcrtc_prestream_gate(
+    NV2AState *d, const char *action, const char *reason,
+    const char *trigger, uint32_t dma_get_before, uint32_t dma_get_after,
+    uint32_t dma_put, uint32_t method, uint32_t parameter, size_t available,
+    int64_t processed, bool fifo_access, bool pfifo_halt, bool pfifo_kick,
+    bool pgraph_waiting_flip, bool pgraph_waiting_nop,
+    bool pgraph_waiting_context)
+{
+    static uint64_t count;
+    bool pending_bytes_known = dma_put >= dma_get_before;
+    uint32_t pending_bytes =
+        pending_bytes_known ? dma_put - dma_get_before : 0;
+
+    if (!nv2a_boot_trace_enabled() ||
+        !nv2a_browser_deterministic_pcrtc_prestream_enabled()) {
+        return;
+    }
+
+    count++;
+    if (strcmp(action, "allow") && !nv2a_browser_trace_sample(count)) {
+        return;
+    }
+
+    fprintf(stderr,
+            "BOOT_MARK b6 nv2a=pcrtc-prestream-gate context=%s"
+            " seq=%" PRIu64
+            " action=%s"
+            " reason=%s"
+            " trigger=%s"
+            " dma_get_before=0x%08" PRIx32
+            " dma_get_after=0x%08" PRIx32
+            " dma_put=0x%08" PRIx32
+            " pending_bytes_known=%s"
+            " pending_bytes=%" PRIu32
+            " method=0x%04" PRIx32
+            " parameter=0x%08" PRIx32
+            " available=%zu"
+            " processed=%" PRId64
+            " pmc_pending=0x%08" PRIx32
+            " pmc_enabled=0x%08" PRIx32
+            " pfifo_pending=0x%08" PRIx32
+            " pfifo_enabled=0x%08" PRIx32
+            " pcrtc_pending=0x%08" PRIx32
+            " pcrtc_enabled=0x%08" PRIx32
+            " pgraph_pending=0x%08" PRIx32
+            " pgraph_enabled=0x%08" PRIx32
+            " fifo_access=%s"
+            " halt=%s"
+            " fifo_kick=%s"
+            " waiting_flip=%s"
+            " waiting_nop=%s"
+            " waiting_context=%s"
+            " entry_ready=%s"
+            " dashboard_observed=%s"
+            " stream_idle_seen=%s\n",
+            nv2a_boot_trace_context(), count, action, reason,
+            trigger ? trigger : "unknown", dma_get_before, dma_get_after,
+            dma_put, pending_bytes_known ? "yes" : "no", pending_bytes,
+            method, parameter, available, processed,
+            d->pmc.pending_interrupts, d->pmc.enabled_interrupts,
+            d->pfifo.pending_interrupts, d->pfifo.enabled_interrupts,
+            d->pcrtc.pending_interrupts, d->pcrtc.enabled_interrupts,
+            d->pgraph.pending_interrupts, d->pgraph.enabled_interrupts,
+            fifo_access ? "yes" : "no",
+            pfifo_halt ? "yes" : "no",
+            pfifo_kick ? "yes" : "no",
+            pgraph_waiting_flip ? "yes" : "no",
+            pgraph_waiting_nop ? "yes" : "no",
+            pgraph_waiting_context ? "yes" : "no",
+            xemu_xbe_boot_trace_entry_ready() ? "yes" : "no",
+            xemu_xbe_boot_trace_dashboard_observed() ? "yes" : "no",
+            xemu_xbe_boot_trace_pfifo_stream_idle_transition_observed() ?
+                "yes" : "no");
+}
+
+void nv2a_browser_deterministic_pcrtc_prestream_maybe_raise(
+    NV2AState *d, const char *trigger,
+    uint32_t dma_get_before, uint32_t dma_get_after, uint32_t dma_put,
+    uint32_t method, uint32_t parameter, size_t available, int64_t processed,
+    bool fifo_access, bool pfifo_halt, bool pfifo_kick,
+    bool pgraph_waiting_flip, bool pgraph_waiting_nop,
+    bool pgraph_waiting_context)
+{
+    NV2AIrqTraceState irq_before;
+    const char *reason =
+        nv2a_browser_deterministic_pcrtc_prestream_blocker(d);
+
+    if (!reason) {
+        if (dma_get_before == dma_get_after ||
+            dma_get_after != dma_put ||
+            dma_put < dma_get_before ||
+            dma_put - dma_get_before != 4) {
+            reason = "not-final-pfifo-word";
+        } else if (available != 1 || processed != 1) {
+            reason = "not-single-final-method";
+        } else if (!fifo_access || pfifo_halt || pfifo_kick) {
+            reason = "pfifo-not-stable";
+        } else if (pgraph_waiting_flip || pgraph_waiting_nop ||
+                   pgraph_waiting_context) {
+            reason = "pgraph-waiting";
+        }
+    }
+
+    if (reason) {
+        nv2a_browser_trace_pcrtc_prestream_gate(
+            d, "block", reason, trigger, dma_get_before, dma_get_after,
+            dma_put, method, parameter, available, processed, fifo_access,
+            pfifo_halt, pfifo_kick, pgraph_waiting_flip, pgraph_waiting_nop,
+            pgraph_waiting_context);
+        return;
+    }
+
+    nv2a_browser_deterministic_pcrtc_prestream_raise_count++;
+    nv2a_browser_trace_pcrtc_prestream_gate(
+        d, "allow", "deterministic-prestream-final-window", trigger,
+        dma_get_before, dma_get_after, dma_put, method, parameter, available,
+        processed, fifo_access, pfifo_halt, pfifo_kick, pgraph_waiting_flip,
+        pgraph_waiting_nop, pgraph_waiting_context);
+    nv2a_browser_trace_pcrtc_vblank_gate(
+        d, "allow", "deterministic-prestream-final-window");
+
+    nv2a_irq_trace_capture(d, &irq_before);
+    d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+    d->pcrtc.raster = 0;
+    nv2a_update_irq(d);
+    nv2a_boot_trace_irq_source(d, "pcrtc", "vblank-raise",
+                               NV_PCRTC_INTR_0_VBLANK, &irq_before);
 }
 
 static void nv2a_browser_submit_console_surface(NV2AState *d)
@@ -1085,7 +1321,7 @@ static void nv2a_vga_gfx_update(void *opaque)
     nv2a_native_reference_submit_console_surface(d);
 #endif
 #ifdef CONFIG_XEMU_BROWSER_BOOT
-    if (!nv2a_browser_pcrtc_vblank_should_raise(&pcrtc_vblank_reason)) {
+    if (!nv2a_browser_pcrtc_vblank_should_raise(d, &pcrtc_vblank_reason)) {
         nv2a_browser_trace_pcrtc_vblank_gate(d, "suppress",
                                              pcrtc_vblank_reason);
         return;
@@ -1127,6 +1363,8 @@ static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)
     memory_region_set_log(d->vram, true, DIRTY_MEMORY_NV2A);
     memory_region_set_log(d->vram, true, DIRTY_MEMORY_NV2A_TEX);
     memory_region_set_dirty(d->vram, 0, memory_region_size(d->vram));
+
+    user_boot_trace_init();
 
     pgraph_init(d);
 
@@ -1171,7 +1409,7 @@ static void nv2a_lock_fifo(NV2AState *d)
 
 static void nv2a_unlock_fifo(NV2AState *d)
 {
-    pfifo_kick(d);
+    pfifo_kick_with_source(d, "nv2a-unlock-fifo");
     qemu_mutex_unlock(&d->pgraph.lock);
     qemu_mutex_unlock(&d->pfifo.lock);
 }
