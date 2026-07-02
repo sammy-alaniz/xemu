@@ -60,6 +60,32 @@
 
 #define MAX_IDE_BUS 2
 
+static bool xbox_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static void xbox_boot_mark(const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!xbox_boot_trace_enabled()) {
+        return;
+    }
+
+    va_start(ap, fmt);
+    fputs("BOOT_MARK ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+
 /* FIXME: Clean this up and propagate errors to UI */
 static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
 {
@@ -100,6 +126,11 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
     if (failed_to_load_bios) {
         fprintf(stderr, "Failed to load BIOS '%s'\n", filename ? filename : "(null)");
         memset(bios_data, 0xff, bios_size);
+        xbox_boot_mark("b1 bios=missing name=%s size=%u",
+                       bios_name, bios_size);
+    } else {
+        xbox_boot_mark("b1 bios=loaded name=%s size=%u",
+                       bios_name, bios_size);
     }
     if (filename != NULL) {
         g_free(filename);
@@ -162,6 +193,9 @@ static void xbox_flash_init(MachineState *ms, MemoryRegion *rom_memory)
         assert(rc == bootrom_size);
         close(fd);
         g_free(filename);
+        xbox_boot_mark("b1 mcpx=loaded size=%d", bootrom_size);
+    } else {
+        xbox_boot_mark("b1 mcpx=absent");
     }
 
     // Leave last BIOS image overlay writeable to satisfy cache dependency
@@ -199,6 +233,8 @@ static void xbox_memory_init(PCMachineState *pcms,
 
     xbox_flash_init(machine, rom_memory);
     pc_system_flash_cleanup_unused(pcms);
+    xbox_boot_mark("b0 ram=initialized bytes=%llu",
+                   (unsigned long long)machine->ram_size);
 }
 
 /* PC hardware initialisation */
@@ -241,6 +277,7 @@ void xbox_init_common(MachineState *machine,
     PCIBus *agp_bus;
 
     x86_cpus_init(x86ms, pcmc->default_cpu_version);
+    xbox_boot_mark("b0 machine=xbox cpu=initialized");
 
     if (kvm_enabled()) {
         kvmclock_create(pcmc->kvmclock_create_always);
@@ -264,6 +301,7 @@ void xbox_init_common(MachineState *machine,
                   &isa_bus,
                   &smbus,
                   &agp_bus);
+    xbox_boot_mark("b2 device=xbox-pci initialized");
 
     pcms->pcibus = pci_bus;
 
@@ -293,11 +331,13 @@ void xbox_init_common(MachineState *machine,
 
     PCIDevice *dev = pci_create_simple(pci_bus, PCI_DEVFN(9, 0), "piix3-ide");
     pci_ide_create_devs(dev);
+    xbox_boot_mark("b2 device=ide initialized");
     // idebus[0] = qdev_get_child_bus(&dev->qdev, "ide.0");
     // idebus[1] = qdev_get_child_bus(&dev->qdev, "ide.1");
 
     /* smbus devices */
     smbus_xbox_smc_init(smbus, 0x10);
+    xbox_boot_mark("b2 device=smc initialized");
 
     const char *video_encoder =
         object_property_get_str(qdev_get_machine(), "video-encoder", NULL);
@@ -312,6 +352,8 @@ void xbox_init_common(MachineState *machine,
     } else {
         smbus_xcalibur_init(smbus, 0x70);
     }
+    xbox_boot_mark("b2 device=video-encoder initialized type=%s",
+                   video_encoder);
 
     /* USB */
     PCIDevice *usb1 = pci_new(PCI_DEVFN(3, 0), "pci-ohci");
@@ -321,23 +363,29 @@ void xbox_init_common(MachineState *machine,
     PCIDevice *usb0 = pci_new(PCI_DEVFN(2, 0), "pci-ohci");
     qdev_prop_set_uint32(&usb0->qdev, "num-ports", 4);
     pci_realize_and_unref(usb0, pci_bus, &error_fatal);
+    xbox_boot_mark("b2 device=usb-ohci initialized");
 
     /* Ethernet! */
     PCIDevice *nvnet = pci_new(PCI_DEVFN(4, 0), "nvnet");
     qemu_configure_nic_device(DEVICE(nvnet), true, "nvnet");
     pci_realize_and_unref(nvnet, pci_bus, &error_fatal);
+    xbox_boot_mark("b2 device=nvnet initialized");
 
     /* APU! */
     mcpx_apu_init(pci_bus, PCI_DEVFN(5, 0), ram_memory);
+    xbox_boot_mark("b2 device=mcpx-apu initialized");
 
     /* ACI! */
     pci_create_simple(pci_bus, PCI_DEVFN(6, 0), "mcpx-aci");
+    xbox_boot_mark("b2 device=mcpx-aci initialized");
 
     /* GPU! */
     nv2a_init(agp_bus, PCI_DEVFN(0, 0), ram_memory);
+    xbox_boot_mark("b2 device=nv2a initialized");
 
     /* FIXME: Stub the memory controller */
     pci_create_simple(pci_bus, PCI_DEVFN(0, 3), "pci-testdev");
+    xbox_boot_mark("b2 device=memory-controller-stub initialized");
 
     if (pci_bus_out) {
         *pci_bus_out = pci_bus;

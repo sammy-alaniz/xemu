@@ -227,8 +227,11 @@ meson_options_help() {
   printf "%s\n" '  vnc-sasl        SASL authentication for VNC server'
   printf "%s\n" '  vpc             vpc image format support'
   printf "%s\n" '  vte             vte support for the gtk UI'
+  printf "%s\n" '  vulkan          Vulkan support'
   printf "%s\n" '  vvfat           vvfat image format support'
   printf "%s\n" '  werror          Treat warnings as errors'
+  printf "%s\n" '  xemu-browser-boot'
+  printf "%s\n" '                  reduced Xbox browser boot profile'
   printf "%s\n" '  whpx            WHPX acceleration support'
   printf "%s\n" '  xen             Xen backend support'
   printf "%s\n" '  xen-pci-passthrough'
@@ -579,11 +582,15 @@ _meson_option_parse() {
     --disable-vpc) printf "%s" -Dvpc=disabled ;;
     --enable-vte) printf "%s" -Dvte=enabled ;;
     --disable-vte) printf "%s" -Dvte=disabled ;;
+    --enable-vulkan) printf "%s" -Dvulkan=enabled ;;
+    --disable-vulkan) printf "%s" -Dvulkan=disabled ;;
     --vtune=*) quote_sh "-Dvtune=$2" ;;
     --enable-vvfat) printf "%s" -Dvvfat=enabled ;;
     --disable-vvfat) printf "%s" -Dvvfat=disabled ;;
     --enable-werror) printf "%s" -Dwerror=true ;;
     --disable-werror) printf "%s" -Dwerror=false ;;
+    --enable-xemu-browser-boot) printf "%s" -Dxemu_browser_boot=true ;;
+    --disable-xemu-browser-boot) printf "%s" -Dxemu_browser_boot=false ;;
     --enable-whpx) printf "%s" -Dwhpx=enabled ;;
     --disable-whpx) printf "%s" -Dwhpx=disabled ;;
     --x86-version=*) quote_sh "-Dx86_version=$2" ;;

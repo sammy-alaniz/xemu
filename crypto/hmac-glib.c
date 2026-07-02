@@ -115,7 +115,10 @@ qcrypto_glib_hmac_bytesv(QCryptoHmac *hmac,
         return -1;
     }
 
-    g_hmac_get_digest(ctx->ghmac, *result, resultlen);
+    gsize glib_resultlen = *resultlen;
+
+    g_hmac_get_digest(ctx->ghmac, *result, &glib_resultlen);
+    *resultlen = glib_resultlen;
 
     return 0;
 }

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xemu browser boot</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>xemu browser boot</h1>
+        <p id="buildLabel">build-wasm-pic/qemu-system-i386.js</p>
+      </div>
+      <div class="actions">
+        <button id="startBtn" type="button">Start</button>
+        <button id="syntheticBtn" type="button">Synthetic</button>
+        <button id="stopBtn" type="button" disabled>Stop</button>
+        <button id="downloadBtn" type="button" disabled>Download</button>
+      </div>
+    </header>
+
+    <section class="status-grid" id="capabilities" aria-label="Browser capabilities"></section>
+
+    <section class="workspace">
+      <div class="panel assets">
+        <div class="panel-title">Assets</div>
+        <label class="asset-row">
+          <span>Flash</span>
+          <input id="flashInput" type="file" required>
+          <output id="flashStatus">required</output>
+        </label>
+        <label class="asset-row">
+          <span>MCPX</span>
+          <input id="mcpxInput" type="file">
+          <output id="mcpxStatus">optional</output>
+        </label>
+        <label class="asset-row">
+          <span>EEPROM</span>
+          <input id="eepromInput" type="file">
+          <output id="eepromStatus">generated</output>
+        </label>
+        <label class="asset-row">
+          <span>HDD</span>
+          <input id="hddInput" type="file">
+          <output id="hddStatus">optional</output>
+        </label>
+        <label class="asset-row">
+          <span>DVD</span>
+          <input id="dvdInput" type="file">
+          <output id="dvdStatus">optional</output>
+        </label>
+      </div>
+
+      <div class="panel display">
+        <div class="panel-title">Display</div>
+        <canvas id="displayCanvas" width="256" height="192" aria-label="Synthetic framebuffer preview"></canvas>
+        <button id="captureDisplayBtn" type="button">Capture</button>
+      </div>
+
+      <div class="panel controls">
+        <div class="panel-title">Run</div>
+        <label>
+          <span>Timeout ms</span>
+          <input id="timeoutInput" type="number" min="100" step="100" value="3000">
+        </label>
+        <label>
+          <span>Build dir</span>
+          <input id="buildDirInput" type="text" value="../../build-wasm-pic">
+        </label>
+        <label class="checkbox">
+          <input id="requireHddInput" type="checkbox">
+          <span>Require B3 asset set</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="log-shell">
+      <div class="panel-title">Transcript</div>
+      <pre id="logOutput" aria-live="polite"></pre>
+    </section>
+  </main>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

@@ -79,8 +79,10 @@ int net_init_vhost_user(const Netdev *netdev, const char *name,
 int net_init_vhost_vdpa(const Netdev *netdev, const char *name,
                         NetClientState *peer, Error **errp);
 
+#ifdef CONFIG_PCAP
 int net_init_pcap(const Netdev *netdev, const char *name,
                   NetClientState *peer, Error **errp);
+#endif
 
 #ifdef CONFIG_VMNET
 int net_init_vmnet_host(const Netdev *netdev, const char *name,

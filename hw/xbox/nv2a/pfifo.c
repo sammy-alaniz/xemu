@@ -21,6 +21,24 @@
 
 #include "nv2a_int.h"
 
+static bool pfifo_boot_trace_enabled(void)
+{
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return true;
+#else
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+#endif
+}
+
+static void pfifo_boot_trace_mark(const char *message)
+{
+    if (pfifo_boot_trace_enabled()) {
+        fprintf(stderr, "BOOT_MARK %s\n", message);
+    }
+}
+
 typedef struct RAMHTEntry {
     uint32_t handle;
     hwaddr instance;
@@ -453,6 +471,7 @@ void *pfifo_thread(void *arg)
 {
     NV2AState *d = (NV2AState *)arg;
 
+    pfifo_boot_trace_mark("b2 thread=nv2a-pfifo started");
     pgraph_init_thread(d);
 
     rcu_register_thread();

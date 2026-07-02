@@ -109,7 +109,10 @@ int qcrypto_glib_hash_finalize(QCryptoHash *hash,
         return -1;
     }
 
-    g_checksum_get_digest(ctx, *result, result_len);
+    gsize glib_result_len = *result_len;
+
+    g_checksum_get_digest(ctx, *result, &glib_result_len);
+    *result_len = glib_result_len;
     return 0;
 }
 

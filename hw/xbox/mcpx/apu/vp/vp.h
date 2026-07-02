@@ -21,7 +21,9 @@
 #ifndef HW_XBOX_MCPX_VP_H
 #define HW_XBOX_MCPX_VP_H
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <samplerate.h>
+#endif
 
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
@@ -43,7 +45,11 @@ typedef struct MCPXAPUVPSSLData {
 typedef struct MCPXAPUVoiceFilter {
     uint16_t voice;
     float resample_buf[NUM_SAMPLES_PER_FRAME * 2];
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     SRC_STATE *resampler;
+#else
+    void *resampler;
+#endif
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;

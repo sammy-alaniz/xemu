@@ -48,7 +48,7 @@ void *qemu_try_memalign(size_t alignment, size_t size)
     if (size == 0) {
         size++;
     }
-#if defined(CONFIG_POSIX_MEMALIGN)
+#if defined(CONFIG_POSIX_MEMALIGN) || defined(__EMSCRIPTEN__)
     int ret;
     ret = posix_memalign(&ptr, alignment, size);
     if (ret != 0) {

@@ -57,6 +57,11 @@ static inline int os_set_daemonize(bool d)
 };
 bool is_daemonized(void);
 static inline void os_daemonize(void) {}
+static inline bool os_set_runas(const char *user_id)
+{
+    return false;
+}
+static inline void os_set_chroot(const char *path) {}
 
 /**
  * qemu_alloc_stack:

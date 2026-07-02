@@ -120,7 +120,7 @@ void qmp_ringbuf_write(const char *device, const char *data,
     Chardev *chr;
     const uint8_t *write_data;
     int ret;
-    gsize write_count;
+    size_t write_count;
 
     chr = qemu_chr_find(device);
     if (!chr) {

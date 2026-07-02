@@ -11,8 +11,10 @@ nv2a_vsh_cpu = declare_dependency(include_directories: nv2a_vsh_cpu_subproj.incl
                                     nv2a_vsh_cpu_subproj.target('nv2a_vsh_disassembler'),
                                     ])
 
-libgloffscreen = static_library('libgloffscreen',
-                          sources: files('gloffscreen/common.c', 'gloffscreen/sdl.c'),
-                          dependencies: sdl)
-gloffscreen = declare_dependency(link_with: libgloffscreen,
-                           include_directories: ['gloffscreen'])
+if not get_option('xemu_browser_boot')
+  libgloffscreen = static_library('libgloffscreen',
+                            sources: files('gloffscreen/common.c', 'gloffscreen/sdl.c'),
+                            dependencies: sdl)
+  gloffscreen = declare_dependency(link_with: libgloffscreen,
+                             include_directories: ['gloffscreen'])
+endif

@@ -19,7 +19,9 @@
 
 #include "qemu/osdep.h"
 #include <stdlib.h>
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <SDL3/SDL_filesystem.h>
+#endif
 #include <string.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -31,7 +33,6 @@
 #include <iostream>
 #include <locale.h>
 
-#include "xemu-controllers.h"
 #include "xemu-settings.h"
 
 #define DEFINE_CONFIG_TREE
@@ -50,6 +51,9 @@ const char *xemu_settings_get_error_message(void)
 
 static bool xemu_settings_detect_portable_mode(void)
 {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+    return false;
+#else
     bool val = false;
     char *portable_path = g_strdup_printf("%s%s", SDL_GetBasePath(), filename);
     FILE *tmpfile;
@@ -60,6 +64,7 @@ static bool xemu_settings_detect_portable_mode(void)
 
     free(portable_path);
     return val;
+#endif
 }
 
 void xemu_settings_set_path(const char *path)
@@ -78,14 +83,22 @@ const char *xemu_settings_get_base_path(void)
     }
 
     if (xemu_settings_detect_portable_mode()) {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
         const char *base = SDL_GetBasePath();
         assert(base != NULL);
         base_path = g_strdup(base);
+#endif
     } else {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+        const char *data_dir = g_get_user_data_dir();
+        base_path = g_build_filename(data_dir, "xemu", "xemu", G_DIR_SEPARATOR_S,
+                                     NULL);
+#else
         char *base = SDL_GetPrefPath("xemu", "xemu");
         assert(base != NULL);
         base_path = g_strdup(base);
         SDL_free(base);
+#endif
     }
     fprintf(stderr, "%s: base path: %s\n", __func__, base_path);
     return base_path;

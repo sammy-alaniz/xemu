@@ -56,5 +56,9 @@ uint8_t *qbase64_decode(const char *input,
         return NULL;
     }
 
-    return g_base64_decode(input, out_len);
+    gsize glib_out_len = 0;
+    uint8_t *output = g_base64_decode(input, &glib_out_len);
+
+    *out_len = glib_out_len;
+    return output;
 }

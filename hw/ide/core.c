@@ -79,6 +79,29 @@ static const char *IDE_DMA_CMD_str(enum ide_dma_cmd enval)
     return "DMA UNKNOWN CMD";
 }
 
+static bool ide_boot_trace_enabled(void)
+{
+    const char *value = getenv("XEMU_BOOT_TRACE");
+
+    return value && value[0] && strcmp(value, "0");
+}
+
+static void ide_boot_mark_hdd_read_once(IDEState *s, int64_t sector_num,
+                                        int nsectors, const char *method)
+{
+    static bool marked;
+
+    if (marked || !ide_boot_trace_enabled() || s->drive_kind != IDE_HD) {
+        return;
+    }
+
+    marked = true;
+    fprintf(stderr,
+            "BOOT_MARK b3 ide=hdd first_read_lba=%" PRId64
+            " nsectors=%d method=%s unit=%d total_sectors=%" PRId64 "\n",
+            sector_num, nsectors, method, s->unit, s->nb_sectors);
+}
+
 static void ide_dummy_transfer_stop(IDEState *s);
 static void ide_security_cmd(IDEState *s);
 
@@ -820,6 +843,7 @@ static void ide_sector_read(IDEState *s)
     }
 
     trace_ide_sector_read(sector_num, n);
+    ide_boot_mark_hdd_read_once(s, sector_num, n, "pio");
 
     if (!ide_sect_range_ok(s, sector_num, n)) {
         ide_rw_error(s);
@@ -968,6 +992,7 @@ static void ide_dma_cb(void *opaque, int ret)
     offset = sector_num << BDRV_SECTOR_BITS;
     switch (s->dma_cmd) {
     case IDE_DMA_READ:
+        ide_boot_mark_hdd_read_once(s, sector_num, n, "dma");
         s->bus->dma->aiocb = dma_blk_read(s->blk, &s->sg, offset,
                                           BDRV_SECTOR_SIZE, ide_dma_cb, s);
         break;

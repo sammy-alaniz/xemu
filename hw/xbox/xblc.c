@@ -25,7 +25,9 @@
 #include "hw/usb.h"
 #include "hw/usb/desc.h"
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <SDL3/SDL.h>
+#endif
 
 /* #define DEBUG_XBLC */
 #ifdef DEBUG_XBLC
@@ -63,8 +65,10 @@ typedef struct USBXBLCState {
     USBDevice dev;
     uint16_t sample_rate;
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     SDL_AudioStream *in;
     SDL_AudioStream *out;
+#endif
 } USBXBLCState;
 
 enum {
@@ -150,6 +154,7 @@ static int xblc_get_sample_rate_for_index(unsigned int index)
     return index < ARRAY_SIZE(sample_rates) ? sample_rates[index] : 0;
 }
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 static SDL_AudioSpec xblc_get_audio_spec(USBXBLCState *s)
 {
     SDL_AudioSpec spec = { .channels = 1,
@@ -157,9 +162,11 @@ static SDL_AudioSpec xblc_get_audio_spec(USBXBLCState *s)
                            .format = SDL_AUDIO_S16LE };
     return spec;
 }
+#endif
 
 static void xblc_handle_reset(USBDevice *dev)
 {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     USBXBLCState *s = USB_XBLC(dev);
 
     DPRINTF("Reset");
@@ -170,10 +177,14 @@ static void xblc_handle_reset(USBDevice *dev)
     if (s->out != NULL) {
         SDL_ClearAudioStream(s->out);
     }
+#else
+    DPRINTF("Reset");
+#endif
 }
 
 static void xblc_audio_channel_update_format(USBXBLCState *s)
 {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     SDL_AudioSpec spec = xblc_get_audio_spec(s);
 
     if (s->in != NULL) {
@@ -182,6 +193,7 @@ static void xblc_audio_channel_update_format(USBXBLCState *s)
     if (s->out != NULL) {
         SDL_SetAudioStreamFormat(s->out, &spec, &spec);
     }
+#endif
 }
 
 static void xblc_set_sample_rate(USBXBLCState *s, uint16_t sample_rate)
@@ -225,7 +237,9 @@ static void xblc_handle_control(USBDevice *dev, USBPacket *p, int request,
 
 static void xblc_handle_data(USBDevice *dev, USBPacket *p)
 {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     USBXBLCState *s = USB_XBLC(dev);
+#endif
 
     switch (p->pid) {
     case USB_TOKEN_IN: {
@@ -234,6 +248,7 @@ static void xblc_handle_data(USBDevice *dev, USBPacket *p)
             break;
         }
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
         if (s->in == NULL) {
             break;
         }
@@ -268,6 +283,7 @@ static void xblc_handle_data(USBDevice *dev, USBPacket *p)
             }
         }
 
+#endif
         break;
     }
     case USB_TOKEN_OUT:
@@ -275,12 +291,14 @@ static void xblc_handle_data(USBDevice *dev, USBPacket *p)
             DPRINTF("Unexpected USB endpoint for USB_TOKEN_OUT");
             break;
         }
+#ifndef CONFIG_XEMU_BROWSER_BOOT
         if (s->out != NULL) {
             if (!SDL_PutAudioStreamData(s->out, p->iov.iov->iov_base,
                                         p->iov.size)) {
                 DPRINTF("SDL_PutAudioStreamData failed: %s", SDL_GetError());
             }
         }
+#endif
         break;
     default:
         DPRINTF("Unexpected USB token pid %d for XBLC device", p->pid);
@@ -292,6 +310,7 @@ static void xblc_handle_data(USBDevice *dev, USBPacket *p)
     }
 }
 
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 static void xblc_audio_channel_init(USBXBLCState *s, bool capture, Error **errp)
 {
     SDL_AudioStream **channel = capture ? &s->in : &s->out;
@@ -311,18 +330,23 @@ static void xblc_audio_channel_init(USBXBLCState *s, bool capture, Error **errp)
 
     SDL_ResumeAudioStreamDevice(*channel);
 }
+#endif
 
 static void xblc_realize(USBDevice *dev, Error **errp)
 {
     USBXBLCState *s = USB_XBLC(dev);
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     Error *err = NULL;
+#endif
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
 
+    s->sample_rate = XBLC_DEFAULT_SAMPLE_RATE;
+
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     s->in = NULL;
     s->out = NULL;
-    s->sample_rate = XBLC_DEFAULT_SAMPLE_RATE;
 
     xblc_audio_channel_init(s, true, &err);
     if (err) {
@@ -335,10 +359,12 @@ static void xblc_realize(USBDevice *dev, Error **errp)
         warn_report_err(err);
         err = NULL;
     }
+#endif
 }
 
 static void xblc_unrealize(USBDevice *dev)
 {
+#ifndef CONFIG_XEMU_BROWSER_BOOT
     USBXBLCState *s = USB_XBLC(dev);
 
     if (s->in) {
@@ -350,6 +376,7 @@ static void xblc_unrealize(USBDevice *dev)
         SDL_DestroyAudioStream(s->out);
         s->out = NULL;
     }
+#endif
 }
 
 static int xblc_post_load(void *opaque, int version_id)

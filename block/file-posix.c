@@ -112,8 +112,10 @@
 #include <sys/diskslice.h>
 #endif
 
-#ifdef EMSCRIPTEN
+#if defined(EMSCRIPTEN) || defined(__EMSCRIPTEN__)
 #include <sys/ioctl.h>
+#include <emscripten/emscripten.h>
+#include <emscripten/em_asm.h>
 #endif
 
 /* OS X does not have O_DSYNC */
@@ -197,7 +199,94 @@ typedef struct BDRVRawState {
     } stats;
 
     PRManager *pr_mgr;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    bool xemu_browser_block;
+    int xemu_browser_block_id;
+    int64_t xemu_browser_block_size;
+#endif
 } BDRVRawState;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+static int xemu_browser_block_open(const char *filename, int writable)
+{
+    return MAIN_THREAD_EM_ASM_INT({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const path = UTF8ToString($0);
+        const cb = Module['xemuBrowserBlockOpen'] || globalThis.xemuBrowserBlockOpen;
+        if (!cb) {
+            console.log('BROWSER_BLOCK_OPEN result=fail reason=missing-callback path=' + JSON.stringify(path));
+            return -1;
+        }
+        return cb(path, $1) | 0;
+    }, filename, writable);
+}
+
+static double xemu_browser_block_get_size(int id)
+{
+    return MAIN_THREAD_EM_ASM_DOUBLE({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const cb = Module['xemuBrowserBlockGetSize'] || globalThis.xemuBrowserBlockGetSize;
+        if (!cb) {
+            return -1;
+        }
+        return Number(cb($0));
+    }, id);
+}
+
+static int xemu_browser_block_read(int id, double offset, void *buf, int bytes)
+{
+    return MAIN_THREAD_EM_ASM_INT({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const cb = Module['xemuBrowserBlockRead'] || globalThis.xemuBrowserBlockRead;
+        if (!cb) {
+            return -1;
+        }
+        return cb($0, Number($1), $2, $3) | 0;
+    }, id, offset, buf, bytes);
+}
+
+static int xemu_browser_block_write(int id, double offset, const void *buf,
+                                    int bytes)
+{
+    return MAIN_THREAD_EM_ASM_INT({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const cb = Module['xemuBrowserBlockWrite'] || globalThis.xemuBrowserBlockWrite;
+        if (!cb) {
+            return -1;
+        }
+        return cb($0, Number($1), $2, $3) | 0;
+    }, id, offset, buf, bytes);
+}
+
+static int xemu_browser_block_flush(int id)
+{
+    return MAIN_THREAD_EM_ASM_INT({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const cb = Module['xemuBrowserBlockFlush'] || globalThis.xemuBrowserBlockFlush;
+        if (!cb) {
+            return -1;
+        }
+        return cb($0) | 0;
+    }, id);
+}
+
+static void xemu_browser_block_close(int id)
+{
+    MAIN_THREAD_EM_ASM({
+        globalThis.xemuBrowserBlockHeap = HEAPU8;
+        const cb = Module['xemuBrowserBlockClose'] || globalThis.xemuBrowserBlockClose;
+        if (cb) {
+            cb($0);
+        }
+    }, id);
+}
+
+static bool xemu_browser_block_path(const char *filename)
+{
+    return g_str_has_prefix(filename, "/xemu-browser-block/");
+}
+#endif
 
 typedef struct BDRVRawReopenState {
     int open_flags;
@@ -313,6 +402,10 @@ static int raw_normalize_devicepath(const char **filename, Error **errp)
  */
 static int probe_logical_blocksize(int fd, unsigned int *sector_size_p)
 {
+#if defined(__EMSCRIPTEN__)
+    errno = ENOTSUP;
+    return -errno;
+#else
     unsigned int sector_size;
     bool success = false;
     int i;
@@ -339,6 +432,7 @@ static int probe_logical_blocksize(int fd, unsigned int *sector_size_p)
     }
 
     return success ? 0 : -errno;
+#endif
 }
 
 /**
@@ -712,6 +806,45 @@ static int raw_open_common(BlockDriverState *bs, QDict *options,
     raw_parse_flags(bdrv_flags, &s->open_flags, false);
 
     s->fd = -1;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (xemu_browser_block_path(filename)) {
+        double size;
+        int writable = (s->open_flags & O_ACCMODE) != O_RDONLY;
+
+        s->xemu_browser_block_id = xemu_browser_block_open(filename, writable);
+        if (s->xemu_browser_block_id < 0) {
+            error_setg(errp, "Could not open browser block image '%s'",
+                       filename);
+            ret = -EIO;
+            goto fail;
+        }
+
+        size = xemu_browser_block_get_size(s->xemu_browser_block_id);
+        if (size < 0) {
+            xemu_browser_block_close(s->xemu_browser_block_id);
+            s->xemu_browser_block_id = -1;
+            error_setg(errp, "Could not query browser block image '%s'",
+                       filename);
+            ret = -EIO;
+            goto fail;
+        }
+
+        s->xemu_browser_block = true;
+        s->xemu_browser_block_size = (int64_t)size;
+        s->has_discard = false;
+        s->has_write_zeroes = false;
+        s->buf_align = BDRV_SECTOR_SIZE;
+        bs->supported_write_flags = 0;
+        bs->supported_zero_flags = 0;
+        ret = 0;
+        error_report("BOOT_MARK b3 browser_block=open path=%s id=%d bytes=%" PRId64,
+                     filename, s->xemu_browser_block_id,
+                     s->xemu_browser_block_size);
+        goto fail;
+    }
+#endif
+
     fd = qemu_open(filename, s->open_flags, errp);
     ret = fd < 0 ? -errno : 0;
 
@@ -2113,7 +2246,7 @@ static int handle_aiocb_write_zeroes_unmap(void *opaque)
 }
 
 #ifndef HAVE_COPY_FILE_RANGE
-#ifndef EMSCRIPTEN
+#if !defined(EMSCRIPTEN) && !defined(__EMSCRIPTEN__)
 static
 #endif
 ssize_t copy_file_range(int in_fd, off_t *in_off, int out_fd,
@@ -2668,6 +2801,26 @@ static int coroutine_fn GRAPH_RDLOCK
 raw_co_preadv(BlockDriverState *bs, int64_t offset, int64_t bytes,
               QEMUIOVector *qiov, BdrvRequestFlags flags)
 {
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    BDRVRawState *s = bs->opaque;
+    g_autofree uint8_t *buf = NULL;
+    int ret;
+
+    if (s->xemu_browser_block) {
+        buf = g_malloc(bytes);
+        ret = xemu_browser_block_read(s->xemu_browser_block_id, offset, buf,
+                                      bytes);
+        if (ret < 0) {
+            return -EIO;
+        }
+        qemu_iovec_from_buf(qiov, 0, buf, bytes);
+        error_report("BOOT_MARK b3 browser_block=read id=%d offset=%" PRId64
+                     " bytes=%" PRId64,
+                     s->xemu_browser_block_id, offset, bytes);
+        return 0;
+    }
+#endif
+
     return raw_co_prw(bs, &offset, bytes, qiov, QEMU_AIO_READ, flags);
 }
 
@@ -2675,6 +2828,26 @@ static int coroutine_fn GRAPH_RDLOCK
 raw_co_pwritev(BlockDriverState *bs, int64_t offset, int64_t bytes,
                QEMUIOVector *qiov, BdrvRequestFlags flags)
 {
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    BDRVRawState *s = bs->opaque;
+    g_autofree uint8_t *buf = NULL;
+    int ret;
+
+    if (s->xemu_browser_block) {
+        buf = g_malloc(bytes);
+        qemu_iovec_to_buf(qiov, 0, buf, bytes);
+        ret = xemu_browser_block_write(s->xemu_browser_block_id, offset, buf,
+                                       bytes);
+        if (ret < 0) {
+            return -EIO;
+        }
+        error_report("BOOT_MARK b3 browser_block=write id=%d offset=%" PRId64
+                     " bytes=%" PRId64,
+                     s->xemu_browser_block_id, offset, bytes);
+        return 0;
+    }
+#endif
+
     return raw_co_prw(bs, &offset, bytes, qiov, QEMU_AIO_WRITE, flags);
 }
 
@@ -2683,6 +2856,13 @@ static int coroutine_fn raw_co_flush_to_disk(BlockDriverState *bs)
     BDRVRawState *s = bs->opaque;
     RawPosixAIOData acb;
     int ret;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        ret = xemu_browser_block_flush(s->xemu_browser_block_id);
+        return ret < 0 ? -EIO : 0;
+    }
+#endif
 
     ret = fd_open(bs);
     if (ret < 0) {
@@ -2711,6 +2891,15 @@ static int coroutine_fn raw_co_flush_to_disk(BlockDriverState *bs)
 static void raw_close(BlockDriverState *bs)
 {
     BDRVRawState *s = bs->opaque;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        xemu_browser_block_close(s->xemu_browser_block_id);
+        s->xemu_browser_block = false;
+        s->xemu_browser_block_id = -1;
+        return;
+    }
+#endif
 
     if (s->fd >= 0) {
 #if defined(CONFIG_BLKZONED)
@@ -2754,6 +2943,13 @@ static int coroutine_fn raw_co_truncate(BlockDriverState *bs, int64_t offset,
     BDRVRawState *s = bs->opaque;
     struct stat st;
     int ret;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        error_setg(errp, "Browser block images cannot be resized yet");
+        return -ENOTSUP;
+    }
+#endif
 
     if (fstat(s->fd, &st)) {
         ret = -errno;
@@ -2944,6 +3140,12 @@ static int64_t raw_getlength(BlockDriverState *bs)
     int ret;
     int64_t size;
 
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        return s->xemu_browser_block_size;
+    }
+#endif
+
     ret = fd_open(bs);
     if (ret < 0) {
         return ret;
@@ -2966,6 +3168,12 @@ static int64_t coroutine_fn raw_co_get_allocated_file_size(BlockDriverState *bs)
 {
     struct stat st;
     BDRVRawState *s = bs->opaque;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        return s->xemu_browser_block_size;
+    }
+#endif
 
     if (fstat(s->fd, &st) < 0) {
         return -errno;
@@ -3854,6 +4062,14 @@ static int raw_check_perm(BlockDriverState *bs, uint64_t perm, uint64_t shared,
     int open_flags;
     int ret;
 
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        s->perm = perm;
+        s->shared_perm = shared;
+        return 0;
+    }
+#endif
+
     /* We may need a new fd if auto-read-only switches the mode */
     ret = raw_reconfigure_getfd(bs, input_flags, &open_flags, perm, errp);
     if (ret < 0) {
@@ -3905,6 +4121,14 @@ static void raw_set_perm(BlockDriverState *bs, uint64_t perm, uint64_t shared)
 {
     BDRVRawState *s = bs->opaque;
 
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        s->perm = perm;
+        s->shared_perm = shared;
+        return;
+    }
+#endif
+
     /* For reopen, we have already switched to the new fd (.bdrv_set_perm is
      * called after .bdrv_reopen_commit) */
     if (s->perm_change_fd && s->fd != s->perm_change_fd) {
@@ -3922,6 +4146,13 @@ static void raw_set_perm(BlockDriverState *bs, uint64_t perm, uint64_t shared)
 static void raw_abort_perm_update(BlockDriverState *bs)
 {
     BDRVRawState *s = bs->opaque;
+
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(__EMSCRIPTEN__)
+    if (s->xemu_browser_block) {
+        s->perm_change_fd = 0;
+        return;
+    }
+#endif
 
     /* For reopen, .bdrv_reopen_abort is called afterwards and will close
      * the file descriptor. */

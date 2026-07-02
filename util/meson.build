@@ -11,9 +11,7 @@ if host_os != 'windows'
   endif
   util_ss.add(files('compatfd.c'))
   util_ss.add(files('event_notifier-posix.c'))
-  if host_os != 'emscripten'
-    util_ss.add(files('mmap-alloc.c'))
-  endif
+  util_ss.add(files('mmap-alloc.c'))
   freebsd_dep = []
   if host_os == 'freebsd'
     freebsd_dep = util
@@ -142,4 +140,4 @@ elif cpu == 's390x'
   util_ss.add(files('s390x_pci_mmio.c'))
 endif
 util_ss.add(files('sha1.c','rc4.c'))
-util_ss.add([curl, files('http.c')])
+util_ss.add(when: curl, if_true: files('http.c'))

@@ -2264,7 +2264,7 @@ void memory_region_set_log(MemoryRegion *mr, bool log, unsigned client)
 {
     uint8_t mask = 1 << client;
 
-#ifdef XBOX
+#if defined(XBOX) || defined(CONFIG_XEMU_BROWSER_BOOT)
     assert((client == DIRTY_MEMORY_VGA) \
         || (client == DIRTY_MEMORY_NV2A) \
         || (client == DIRTY_MEMORY_NV2A_TEX));

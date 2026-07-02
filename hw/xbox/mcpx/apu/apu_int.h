@@ -23,7 +23,9 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#ifndef CONFIG_XEMU_BROWSER_BOOT
 #include <SDL3/SDL.h>
+#endif
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
@@ -118,7 +120,11 @@ typedef struct MCPXAPUState {
     struct {
         McpxApuDebugMonitorPoint point;
         int16_t frame_buf[256][2]; // 1 EP frame (0x400 bytes)
+#ifndef CONFIG_XEMU_BROWSER_BOOT
         SDL_AudioStream *stream;
+#else
+        void *stream;
+#endif
         int queued_bytes_low, queued_bytes_high;
     } monitor;
 } MCPXAPUState;
