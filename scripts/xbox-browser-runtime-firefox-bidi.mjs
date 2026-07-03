@@ -14,6 +14,8 @@ const buildDir = process.env.XEMU_BROWSER_RUNTIME_BUILD_DIR || "../../build-wasm
 const runtimeMode = process.env.XEMU_BROWSER_RUNTIME_MODE || "real";
 const interactive = process.env.XEMU_BROWSER_RUNTIME_INTERACTIVE !== "0";
 const expectB3 = process.env.XEMU_BROWSER_RUNTIME_EXPECT_B3 !== "0";
+const expectDisplay = process.env.XEMU_BROWSER_RUNTIME_EXPECT_DISPLAY === "1";
+const expectNonblack = process.env.XEMU_BROWSER_RUNTIME_EXPECT_NONBLACK === "1";
 const firefoxBin = process.env.XEMU_BROWSER_RUNTIME_FIREFOX_BIN || "firefox";
 const dumpTranscript = process.env.XEMU_BROWSER_RUNTIME_DUMP_TRANSCRIPT === "1";
 
@@ -128,9 +130,23 @@ class BidiClient {
   }
 }
 
-async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, interactive, expectB3 }) {
+async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, interactive, expectB3, expectDisplay, expectNonblack }) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const transcriptText = () => document.querySelector("#logOutput")?.textContent || "";
+  const displayHasNonblackPixel = () => {
+    const canvas = document.querySelector("#displayCanvas");
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+      return false;
+    }
+    const context = canvas.getContext("2d", { alpha: false });
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    for (let offset = 0; offset < image.data.length; offset += 4) {
+      if (image.data[offset] !== 0 || image.data[offset + 1] !== 0 || image.data[offset + 2] !== 0) {
+        return true;
+      }
+    }
+    return false;
+  };
   const dispatchChange = (element) => element.dispatchEvent(new Event("change", { bubbles: true }));
   const waitFor = async (predicate, timeout, reason) => {
     const deadline = Date.now() + timeout;
@@ -202,8 +218,12 @@ async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, intera
         reason = "finished";
         return true;
       }
-      if (interactive && text.includes("Runtime yielded to the browser event loop; interactive worker remains active.")) {
-        reason = "interactive-active";
+      if (interactive &&
+          text.includes("Runtime yielded to the browser event loop; interactive worker remains active.") &&
+          (!expectDisplay || text.includes("BROWSER_DISPLAY_FRAME result=pass")) &&
+          (!expectNonblack || displayHasNonblackPixel())) {
+        reason = expectNonblack ? "interactive-nonblack" :
+          expectDisplay ? "interactive-display" : "interactive-active";
         return true;
       }
       return false;
@@ -217,6 +237,8 @@ async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, intera
   const transcript = transcriptText();
   const hasB3 = transcript.includes("BOOT_MARK b3 browser_block=read") ||
     transcript.includes("BOOT_MARK b3 ide=hdd");
+  const hasDisplayFrame = transcript.includes("BROWSER_DISPLAY_FRAME result=pass");
+  const hasNonblackDisplay = displayHasNonblackPixel();
   const hasError = transcript.includes("Error:") ||
     transcript.includes("compilation failed") ||
     transcript.includes("shader linking failed") ||
@@ -228,6 +250,8 @@ async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, intera
     reason,
     transcript,
     hasB3,
+    hasDisplayFrame,
+    hasNonblackDisplay,
     hasError,
     finished: finishedMatch ? finishedMatch[1] : "",
     lineCount: transcript.split(/\r?\n/).filter((line) => line.length > 0).length,
@@ -238,6 +262,8 @@ async function runCurrentPage({ timeoutMs, bootMs, buildDir, runtimeMode, intera
       text: node.textContent || "",
     })),
     expectB3,
+    expectDisplay,
+    expectNonblack,
   };
 }
 
@@ -276,6 +302,8 @@ async function main() {
       runtimeMode,
       interactive,
       expectB3,
+      expectDisplay,
+      expectNonblack,
     });
 
     if (dumpTranscript) {
@@ -290,6 +318,12 @@ async function main() {
     if (runtimeMode === "real" && expectB3 && !run.hasB3) {
       fail("missing-b3-marker", `phase=${run.reason} lines=${run.lineCount}`);
     }
+    if (runtimeMode === "real" && expectDisplay && !run.hasDisplayFrame) {
+      fail("missing-display-frame", `phase=${run.reason} lines=${run.lineCount}`);
+    }
+    if (runtimeMode === "real" && expectNonblack && !run.hasNonblackDisplay) {
+      fail("missing-nonblack-display", `phase=${run.reason} lines=${run.lineCount}`);
+    }
 
     console.log([
       "BROWSER_RUNTIME_FIREFOX_BIDI",
@@ -300,6 +334,8 @@ async function main() {
       `phase=${run.reason}`,
       `finished=${run.finished || "none"}`,
       `b3_marker=${run.hasB3 ? "yes" : "no"}`,
+      `display_frame=${run.hasDisplayFrame ? "yes" : "no"}`,
+      `nonblack_display=${run.hasNonblackDisplay ? "yes" : "no"}`,
       `lines=${run.lineCount}`,
     ].join(" "));
   } finally {

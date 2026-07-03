@@ -17,22 +17,32 @@
 
 static DisplayChangeListener browser_dcl;
 static uint8_t *rgba_pixels;
+#if defined(CONFIG_OPENGL) && !(defined(__EMSCRIPTEN__) && \
+                                defined(CONFIG_XEMU_BROWSER_BOOT))
 static uint8_t *gl_pixels;
+#endif
 static int rgba_width;
 static int rgba_height;
-#ifdef CONFIG_OPENGL
+#if defined(CONFIG_OPENGL) && !(defined(__EMSCRIPTEN__) && \
+                                defined(CONFIG_XEMU_BROWSER_BOOT))
 static GLuint readback_fbo;
 static bool warned_gl_readback;
 #endif
 
-static void xemu_browser_display_post_frame(int width, int height,
-                                            int stride, const uint8_t *data)
+void xemu_browser_display_post_frame(const char *source, int width, int height,
+                                     int stride, const uint8_t *data)
 {
-    EM_ASM({
-        if (Module.xemuBrowserDisplayUpdate) {
-            Module.xemuBrowserDisplayUpdate($0, $1, $2, $3);
+    int32_t data_ptr = (int32_t)(uintptr_t)data;
+    int32_t source_ptr = (int32_t)(uintptr_t)source;
+
+    MAIN_THREAD_EM_ASM({
+        globalThis.xemuBrowserDisplayHeap = HEAPU8;
+        const cb = Module['xemuBrowserDisplayUpdate'] ||
+            globalThis.xemuBrowserDisplayUpdate;
+        if (cb) {
+            cb($0 >>> 0, $1, $2, $3, UTF8ToString($4));
         }
-    }, data, width, height, stride);
+    }, data_ptr, width, height, stride, source_ptr);
 }
 
 static bool xemu_browser_display_check_format(DisplayChangeListener *dcl,
@@ -114,13 +124,74 @@ static void xemu_browser_display_send_surface(DisplaySurface *surface)
     }
 
     xemu_browser_display_convert(surface);
-    xemu_browser_display_post_frame(rgba_width, rgba_height, rgba_width * 4,
-                                    rgba_pixels);
+    xemu_browser_display_post_frame("surface", rgba_width, rgba_height,
+                                    rgba_width * 4, rgba_pixels);
 }
 
 #ifdef CONFIG_OPENGL
+static bool xemu_browser_display_send_vram_frame(void)
+{
+    static unsigned vram_size_warning_count;
+    int width;
+    int height;
+
+    if (!nv2a_get_vram_display_size(&width, &height)) {
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+        if (vram_size_warning_count < 8) {
+            vram_size_warning_count++;
+            fprintf(stderr,
+                    "Browser display: vram frame skipped "
+                    "reason=size-unavailable\n");
+        }
+#endif
+        return false;
+    }
+
+    xemu_browser_display_ensure_rgba(width, height);
+    if (!nv2a_copy_vram_display_frame(rgba_pixels, width, height)) {
+        return false;
+    }
+
+    xemu_browser_display_post_frame("vram", width, height, width * 4,
+                                    rgba_pixels);
+    return true;
+}
+
 static bool xemu_browser_display_send_gl_frame(QemuConsole *con)
 {
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    static unsigned gl_request_count;
+    static unsigned gl_miss_count;
+    static bool gl_hit_logged;
+    GLuint tex;
+
+    (void)con;
+
+    /*
+     * Browser WebGL textures belong to the NV2A display pthread. Triggering
+     * the sync is enough; that thread reads and posts the frame while its GL
+     * context is current.
+     */
+    gl_request_count++;
+    tex = nv2a_get_framebuffer_surface();
+    nv2a_release_framebuffer_surface();
+    if (tex) {
+        if (!gl_hit_logged) {
+            fprintf(stderr,
+                    "Browser display: requested GL framebuffer "
+                    "attempt=%u tex=%u\n",
+                    gl_request_count, tex);
+            gl_hit_logged = true;
+        }
+    } else if (gl_miss_count < 8 || gl_request_count % 300 == 0) {
+        gl_miss_count++;
+        fprintf(stderr,
+                "Browser display: GL framebuffer unavailable "
+                "attempt=%u misses=%u\n",
+                gl_request_count, gl_miss_count);
+    }
+    return tex != 0;
+#else
     DisplaySurface *surface = qemu_console_surface(con);
     int width = surface ? surface_width(surface) : 0;
     int height = surface ? surface_height(surface) : 0;
@@ -161,7 +232,8 @@ static bool xemu_browser_display_send_gl_frame(QemuConsole *con)
                    gl_pixels + (height - 1 - y) * width * 4,
                    width * 4);
         }
-        xemu_browser_display_post_frame(width, height, width * 4, rgba_pixels);
+        xemu_browser_display_post_frame("gl-texture", width, height,
+                                        width * 4, rgba_pixels);
         sent = true;
     } else if (!warned_gl_readback) {
         fprintf(stderr,
@@ -175,6 +247,7 @@ static bool xemu_browser_display_send_gl_frame(QemuConsole *con)
     glBindFramebuffer(GL_FRAMEBUFFER, previous_framebuffer);
     nv2a_release_framebuffer_surface();
     return sent;
+#endif
 }
 #endif
 
@@ -182,9 +255,23 @@ static void xemu_browser_display_update(DisplayChangeListener *dcl,
                                         int x, int y, int w, int h)
 {
 #ifdef CONFIG_OPENGL
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    bool gl_requested = xemu_browser_display_send_gl_frame(dcl->con);
+
+    if (xemu_browser_display_send_vram_frame()) {
+        return;
+    }
+    if (gl_requested) {
+        return;
+    }
+#else
     if (xemu_browser_display_send_gl_frame(dcl->con)) {
         return;
     }
+    if (xemu_browser_display_send_vram_frame()) {
+        return;
+    }
+#endif
 #endif
     xemu_browser_display_send_surface(qemu_console_surface(dcl->con));
 }
@@ -199,9 +286,23 @@ static void xemu_browser_display_refresh(DisplayChangeListener *dcl)
 {
     graphic_hw_update(dcl->con);
 #ifdef CONFIG_OPENGL
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    bool gl_requested = xemu_browser_display_send_gl_frame(dcl->con);
+
+    if (xemu_browser_display_send_vram_frame()) {
+        return;
+    }
+    if (gl_requested) {
+        return;
+    }
+#else
     if (xemu_browser_display_send_gl_frame(dcl->con)) {
         return;
     }
+    if (xemu_browser_display_send_vram_frame()) {
+        return;
+    }
+#endif
 #endif
     xemu_browser_display_send_surface(qemu_console_surface(dcl->con));
 }

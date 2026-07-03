@@ -32,6 +32,9 @@ let lastObjectUrl = null;
 let runTimer = null;
 let localAssets = new Map();
 let localAssetManifestPromise = null;
+let displayFrameCount = 0;
+let displayHasSeenNonblack = false;
+let displaySkippedBlackFrameCount = 0;
 
 function loadConfig() {
   try {
@@ -159,15 +162,43 @@ function clearDisplayCanvas() {
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
-function drawDisplayFrame({ width, height, pixels }) {
+function pixelsHaveNonblack(data) {
+  for (let offset = 0; offset < data.length; offset += 4) {
+    if (data[offset] !== 0 || data[offset + 1] !== 0 || data[offset + 2] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function drawDisplayFrame({ width, height, source = "unknown", pixels, nonblack = null }) {
   const canvas = refs.displayCanvas;
+  const data = new Uint8ClampedArray(pixels);
+  const frameHasNonblack = nonblack === true || pixelsHaveNonblack(data);
+
+  displayFrameCount += 1;
+
+  if (displayHasSeenNonblack && !frameHasNonblack) {
+    displaySkippedBlackFrameCount += 1;
+    if (displaySkippedBlackFrameCount === 1 ||
+        displaySkippedBlackFrameCount % 300 === 0) {
+      appendLog(`BROWSER_DISPLAY_FRAME result=skip-black frame=${displayFrameCount} source=${source} width=${width} height=${height} skipped=${displaySkippedBlackFrameCount}`);
+    }
+    return;
+  }
+
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
   const context = canvas.getContext("2d", { alpha: false });
-  const image = new ImageData(new Uint8ClampedArray(pixels), width, height);
+  const image = new ImageData(data, width, height);
   context.putImageData(image, 0, 0);
+  const firstNonblack = frameHasNonblack && !displayHasSeenNonblack;
+  displayHasSeenNonblack ||= frameHasNonblack;
+  if (displayFrameCount === 1 || firstNonblack || displayFrameCount % 300 === 0) {
+    appendLog(`BROWSER_DISPLAY_FRAME result=pass frame=${displayFrameCount} source=${source} width=${width} height=${height} nonblack=${frameHasNonblack ? "yes" : "no"}`);
+  }
 }
 
 function createGlCanvasTransfer() {
@@ -364,6 +395,10 @@ async function runWithAssets(selectedAssets, runMode) {
   saveConfig();
   refs.logOutput.textContent = "";
   transcript = [];
+  displayFrameCount = 0;
+  displayHasSeenNonblack = false;
+  displaySkippedBlackFrameCount = 0;
+  clearDisplayCanvas();
 
   worker = new Worker("./worker.js", { type: "module" });
   refs.startBtn.disabled = true;

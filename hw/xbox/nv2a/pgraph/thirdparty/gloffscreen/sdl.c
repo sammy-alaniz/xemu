@@ -180,6 +180,70 @@ void xemu_browser_glGenVertexArrays(GLsizei n, GLuint *arrays)
     browser_gl_gen_object_js(n, arrays, 5);
 }
 
+EM_JS(GLuint, browser_gl_create_program_js, (void), {
+    const ctx = (typeof GLctx !== "undefined" && GLctx) ||
+        (GL.currentContext && GL.currentContext.GLctx) ||
+        Module.ctx;
+
+    if (!ctx || typeof ctx.createProgram !== "function") {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return 0;
+    }
+    if (typeof GLctx === "undefined" || !GLctx) {
+        Module.ctx = GLctx = ctx;
+    }
+
+    const program = ctx.createProgram();
+    if (!program) {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return 0;
+    }
+
+    const id = GL.getNewId(GL.programs);
+    program.name = id;
+    program.maxUniformLength = 0;
+    program.maxAttributeLength = 0;
+    program.maxUniformBlockNameLength = 0;
+    program.uniformIdCounter = 1;
+    GL.programs[id] = program;
+    return id;
+});
+
+GLuint xemu_browser_glCreateProgram(void)
+{
+    return browser_gl_create_program_js();
+}
+
+EM_JS(GLuint, browser_gl_create_shader_js, (GLenum shader_type), {
+    const ctx = (typeof GLctx !== "undefined" && GLctx) ||
+        (GL.currentContext && GL.currentContext.GLctx) ||
+        Module.ctx;
+
+    if (!ctx || typeof ctx.createShader !== "function") {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return 0;
+    }
+    if (typeof GLctx === "undefined" || !GLctx) {
+        Module.ctx = GLctx = ctx;
+    }
+
+    const shader = ctx.createShader(shader_type);
+    if (!shader) {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return 0;
+    }
+
+    const id = GL.getNewId(GL.shaders);
+    shader.name = id;
+    GL.shaders[id] = shader;
+    return id;
+});
+
+GLuint xemu_browser_glCreateShader(GLenum shader_type)
+{
+    return browser_gl_create_shader_js(shader_type);
+}
+
 EM_JS(void, browser_gl_get_integerv_js, (GLenum pname, GLint *data), {
     const ctx = (typeof GLctx !== "undefined" && GLctx) ||
         (GL.currentContext && GL.currentContext.GLctx) ||
@@ -320,6 +384,106 @@ void xemu_browser_glBufferSubData(GLenum target, GLintptr offset,
                                   GLsizeiptr size, const void *data)
 {
     browser_gl_buffer_sub_data_js(target, offset, size, data);
+}
+
+EM_JS(void, browser_gl_tex_image_2d_js,
+      (GLenum target, GLint level, GLint internal_format, GLsizei width,
+       GLsizei height, GLint border, GLenum format, GLenum type,
+       const void *pixels), {
+    const ctx = (typeof GLctx !== "undefined" && GLctx) ||
+        (GL.currentContext && GL.currentContext.GLctx) ||
+        Module.ctx;
+
+    if (!ctx) {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return;
+    }
+    if (typeof GLctx === "undefined" || !GLctx) {
+        Module.ctx = GLctx = ctx;
+    }
+
+    if (ctx.currentPixelUnpackBufferBinding) {
+        ctx.texImage2D(target, level, internal_format, width, height, border,
+                       format, type, pixels);
+        return;
+    }
+
+    if (pixels && HEAPU8.buffer.byteLength < 0x80000000) {
+        const heap = heapObjectForWebGLType(type);
+        const index = toTypedArrayIndex(pixels, heap);
+        ctx.texImage2D(target, level, internal_format, width, height, border,
+                       format, type, heap, index);
+        return;
+    }
+
+    const pixelData = pixels ?
+        emscriptenWebGLGetTexPixelData(type, format, width, height,
+                                       pixels).slice() :
+        null;
+    ctx.texImage2D(target, level, internal_format, width, height, border,
+                   format, type, pixelData);
+});
+
+void xemu_browser_glTexImage2D(GLenum target, GLint level, GLint internal_format,
+                               GLsizei width, GLsizei height, GLint border,
+                               GLenum format, GLenum type, const void *pixels)
+{
+    browser_gl_tex_image_2d_js(target, level, internal_format, width, height,
+                               border, format, type, pixels);
+}
+
+EM_JS(void, browser_gl_tex_image_3d_js,
+      (GLenum target, GLint level, GLint internal_format, GLsizei width,
+       GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
+       const void *pixels), {
+    const ctx = (typeof GLctx !== "undefined" && GLctx) ||
+        (GL.currentContext && GL.currentContext.GLctx) ||
+        Module.ctx;
+
+    if (!ctx) {
+        GL.recordError(0x502 /* GL_INVALID_OPERATION */);
+        return;
+    }
+    if (typeof GLctx === "undefined" || !GLctx) {
+        Module.ctx = GLctx = ctx;
+    }
+
+    if (ctx.currentPixelUnpackBufferBinding) {
+        ctx.texImage3D(target, level, internal_format, width, height, depth,
+                       border, format, type, pixels);
+        return;
+    }
+
+    if (pixels && HEAPU8.buffer.byteLength < 0x80000000) {
+        const heap = heapObjectForWebGLType(type);
+        const index = toTypedArrayIndex(pixels, heap);
+        ctx.texImage3D(target, level, internal_format, width, height, depth,
+                       border, format, type, heap, index);
+        return;
+    }
+
+    let pixelData = null;
+    if (pixels) {
+        const heap = heapObjectForWebGLType(type);
+        const sizePerPixel = colorChannelsInGlTextureFormat(format) *
+            heap.BYTES_PER_ELEMENT;
+        const bytes = computeUnpackAlignedImageSize(width, height * depth,
+                                                    sizePerPixel);
+        const start = toTypedArrayIndex(pixels, heap);
+        const end = toTypedArrayIndex(pixels + bytes, heap);
+        pixelData = heap.subarray(start, end).slice();
+    }
+    ctx.texImage3D(target, level, internal_format, width, height, depth, border,
+                   format, type, pixelData);
+});
+
+void xemu_browser_glTexImage3D(GLenum target, GLint level, GLint internal_format,
+                               GLsizei width, GLsizei height, GLsizei depth,
+                               GLint border, GLenum format, GLenum type,
+                               const void *pixels)
+{
+    browser_gl_tex_image_3d_js(target, level, internal_format, width, height,
+                               depth, border, format, type, pixels);
 }
 
 EM_JS(void, browser_gl_bind_vertex_array_js, (GLuint array), {

@@ -233,6 +233,10 @@ static bool surface_to_texture_can_fastpath(SurfaceBinding *surface,
     return false;
 }
 
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+static unsigned browser_incomplete_surface_to_texture_warnings;
+#endif
+
 static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
                               int texture_unit, GLuint gl_target,
                               GLuint gl_texture, unsigned int width,
@@ -248,14 +252,40 @@ static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gl_target,
                            gl_texture, 0);
     glDrawBuffers(1, draw_buffers);
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
+        if (browser_incomplete_surface_to_texture_warnings < 8) {
+            browser_incomplete_surface_to_texture_warnings++;
+            fprintf(stderr,
+                    "Browser GL: skipping incomplete surface-to-texture "
+                    "framebuffer status=0x%x target=0x%x texture=%u "
+                    "width=%u height=%u surface_format=0x%x\n",
+                    framebuffer_status, gl_target, gl_texture, width, height,
+                    surface->shape.color_format);
+        }
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               gl_target, 0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, r->gl_framebuffer);
+        glBindVertexArray(r->gl_vertex_array);
+        glBindTexture(gl_target, gl_texture);
+        glUseProgram(r->shader_binding ? r->shader_binding->gl_program : 0);
+        return;
+    }
+#endif
+    assert(framebuffer_status == GL_FRAMEBUFFER_COMPLETE);
     assert(glGetError() == GL_NO_ERROR);
 
-    float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#else
+    float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, color);
+#endif
 
     glBindVertexArray(r->s2t_rndr.vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->s2t_rndr.vbo);
@@ -628,6 +658,12 @@ static bool check_surface_compatibility(SurfaceBinding *s1, SurfaceBinding *s2,
         (s1->fmt.gl_attachment == s2->fmt.gl_attachment) &&
         (s1->fmt.gl_internal_format == s2->fmt.gl_internal_format) &&
         (s1->pitch == s2->pitch);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    format_compatible = format_compatible &&
+        (s1->fmt.bytes_per_pixel == s2->fmt.bytes_per_pixel) &&
+        (!s1->color ||
+         s1->shape.color_format == s2->shape.color_format);
+#endif
     if (!format_compatible) {
         return false;
     }
@@ -638,6 +674,232 @@ static bool check_surface_compatibility(SurfaceBinding *s1, SurfaceBinding *s2,
         return (s1->width == s2->width) && (s1->height == s2->height);
     }
 }
+
+static void pgraph_gl_set_draw_buffer_for_attachment(GLenum attachment)
+{
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    GLenum draw_buffer =
+        attachment == GL_COLOR_ATTACHMENT0 ? GL_COLOR_ATTACHMENT0 : GL_NONE;
+
+    glDrawBuffers(1, &draw_buffer);
+#else
+    (void)attachment;
+#endif
+}
+
+static void pgraph_gl_set_current_surface_draw_buffer(PGRAPHGLState *r)
+{
+    pgraph_gl_set_draw_buffer_for_attachment(
+        r->color_binding ? GL_COLOR_ATTACHMENT0 : GL_NONE);
+}
+
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+static unsigned browser_incomplete_surface_framebuffer_warnings;
+static uint8_t *browser_surface_upload_rgba;
+static uint8_t *browser_surface_download_rgba;
+
+static void browser_detach_mismatched_zeta(PGRAPHGLState *r)
+{
+    if (!r->color_binding || !r->zeta_binding) {
+        return;
+    }
+    if (r->color_binding->width == r->zeta_binding->width &&
+        r->color_binding->height == r->zeta_binding->height) {
+        return;
+    }
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, r->zeta_binding->fmt.gl_attachment,
+                           GL_TEXTURE_2D, 0, 0);
+    r->zeta_binding = NULL;
+}
+#endif
+
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+static uint16_t browser_read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t browser_read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void browser_write_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = value & 0xff;
+    p[1] = value >> 8;
+}
+
+static void browser_write_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = value & 0xff;
+    p[1] = (value >> 8) & 0xff;
+    p[2] = (value >> 16) & 0xff;
+    p[3] = (value >> 24) & 0xff;
+}
+
+static uint8_t browser_expand_5(uint8_t value)
+{
+    return (value << 3) | (value >> 2);
+}
+
+static uint8_t browser_expand_6(uint8_t value)
+{
+    return (value << 2) | (value >> 4);
+}
+
+static uint8_t browser_pack_5(uint8_t value)
+{
+    return (value * 31 + 127) / 255;
+}
+
+static uint8_t browser_pack_6(uint8_t value)
+{
+    return (value * 63 + 127) / 255;
+}
+
+static bool browser_surface_uses_rgba_storage(const SurfaceBinding *surface)
+{
+    return surface->color &&
+           surface->fmt.gl_internal_format == GL_RGBA8 &&
+           surface->fmt.gl_format == GL_RGBA &&
+           surface->fmt.gl_type == GL_UNSIGNED_BYTE;
+}
+
+static uint8_t *browser_ensure_scratch(uint8_t **buffer, gsize size)
+{
+    *buffer = g_realloc(*buffer, size);
+    return *buffer;
+}
+
+static void browser_surface_native_to_rgba(const SurfaceBinding *surface,
+                                           const uint8_t *src,
+                                           unsigned int src_pitch,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           uint8_t *dst)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        const uint8_t *src_row = src + y * src_pitch;
+        uint8_t *dst_row = dst + y * width * 4;
+
+        for (unsigned int x = 0; x < width; x++) {
+            const uint8_t *s = src_row + x * surface->fmt.bytes_per_pixel;
+            uint8_t *d = dst_row + x * 4;
+
+            switch (surface->shape.color_format) {
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5: {
+                uint16_t pixel = browser_read_le16(s);
+                d[0] = browser_expand_5((pixel >> 10) & 0x1f);
+                d[1] = browser_expand_5((pixel >> 5) & 0x1f);
+                d[2] = browser_expand_5(pixel & 0x1f);
+                d[3] = 255;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+                uint16_t pixel = browser_read_le16(s);
+                d[0] = browser_expand_5((pixel >> 11) & 0x1f);
+                d[1] = browser_expand_6((pixel >> 5) & 0x3f);
+                d[2] = browser_expand_5(pixel & 0x1f);
+                d[3] = 255;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8: {
+                uint32_t pixel = browser_read_le32(s);
+                d[0] = (pixel >> 16) & 0xff;
+                d[1] = (pixel >> 8) & 0xff;
+                d[2] = pixel & 0xff;
+                d[3] = 255;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8: {
+                uint32_t pixel = browser_read_le32(s);
+                d[0] = (pixel >> 16) & 0xff;
+                d[1] = (pixel >> 8) & 0xff;
+                d[2] = pixel & 0xff;
+                d[3] = (pixel >> 24) & 0xff;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+                d[0] = 0;
+                d[1] = 0;
+                d[2] = s[0];
+                d[3] = 255;
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+                d[0] = 0;
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = 255;
+                break;
+            default:
+                d[0] = d[1] = d[2] = 0;
+                d[3] = 255;
+                break;
+            }
+        }
+    }
+}
+
+static void browser_surface_rgba_to_native(const SurfaceBinding *surface,
+                                           const uint8_t *src,
+                                           unsigned int src_pitch,
+                                           unsigned int dst_pitch,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           uint8_t *dst)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        const uint8_t *src_row = src + y * src_pitch;
+        uint8_t *dst_row = dst + y * dst_pitch;
+
+        for (unsigned int x = 0; x < width; x++) {
+            const uint8_t *s = src_row + x * 4;
+            uint8_t *d = dst_row + x * surface->fmt.bytes_per_pixel;
+
+            switch (surface->shape.color_format) {
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+                browser_write_le16(d,
+                    (browser_pack_5(s[0]) << 10) |
+                    (browser_pack_5(s[1]) << 5) |
+                    browser_pack_5(s[2]));
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+                browser_write_le16(d,
+                    (browser_pack_5(s[0]) << 11) |
+                    (browser_pack_6(s[1]) << 5) |
+                    browser_pack_5(s[2]));
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+                browser_write_le32(d,
+                    ((uint32_t)s[0] << 16) |
+                    ((uint32_t)s[1] << 8) |
+                    (uint32_t)s[2]);
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+                browser_write_le32(d,
+                    ((uint32_t)s[3] << 24) |
+                    ((uint32_t)s[0] << 16) |
+                    ((uint32_t)s[1] << 8) |
+                    (uint32_t)s[2]);
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+                d[0] = s[2];
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+                d[0] = s[2];
+                d[1] = s[1];
+                break;
+            default:
+                memset(d, 0, surface->fmt.bytes_per_pixel);
+                break;
+            }
+        }
+    }
+}
+#endif
 
 void pgraph_gl_surface_download_if_dirty(NV2AState *d,
                                            SurfaceBinding *surface)
@@ -663,6 +925,10 @@ static void bind_current_surface(NV2AState *d)
     }
 
     if (r->color_binding || r->zeta_binding) {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        browser_detach_mismatched_zeta(r);
+#endif
+        pgraph_gl_set_current_surface_draw_buffer(r);
         assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                GL_FRAMEBUFFER_COMPLETE);
     }
@@ -723,6 +989,7 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
     glFramebufferTexture2D(GL_FRAMEBUFFER, surface->fmt.gl_attachment,
                            GL_TEXTURE_2D, surface->gl_buffer, 0);
 
+    pgraph_gl_set_draw_buffer_for_attachment(surface->fmt.gl_attachment);
     assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
     /* Read surface into memory */
@@ -745,11 +1012,30 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
         gl_read_buf = pg->scale_buf;
     }
 
-    glo_readpixels(
-        surface->fmt.gl_format, surface->fmt.gl_type, surface->fmt.bytes_per_pixel,
-        pg->surface_scale_factor * surface->pitch,
-        pg->surface_scale_factor * surface->width,
-        pg->surface_scale_factor * surface->height, flip, gl_read_buf);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (browser_surface_uses_rgba_storage(surface)) {
+        unsigned int read_width = pg->surface_scale_factor * surface->width;
+        unsigned int read_height = pg->surface_scale_factor * surface->height;
+        uint8_t *rgba = browser_ensure_scratch(&browser_surface_download_rgba,
+                                               (gsize)read_width *
+                                               read_height * 4);
+
+        glo_readpixels(GL_RGBA, GL_UNSIGNED_BYTE, 4, read_width * 4,
+                       read_width, read_height, flip, rgba);
+        browser_surface_rgba_to_native(surface, rgba, read_width * 4,
+                                       pg->surface_scale_factor *
+                                       surface->pitch, read_width, read_height,
+                                       gl_read_buf);
+    } else
+#endif
+    {
+        glo_readpixels(surface->fmt.gl_format, surface->fmt.gl_type,
+                       surface->fmt.bytes_per_pixel,
+                       pg->surface_scale_factor * surface->pitch,
+                       pg->surface_scale_factor * surface->width,
+                       pg->surface_scale_factor * surface->height, flip,
+                       gl_read_buf);
+    }
 
     /* FIXME: Replace this with a hw accelerated version */
     if (downscale) {
@@ -961,6 +1247,17 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                             surface->fmt.bytes_per_pixel,
                             d->pgraph.surface_scale_factor);
     }
+
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (browser_surface_uses_rgba_storage(surface)) {
+        uint8_t *rgba = browser_ensure_scratch(&browser_surface_upload_rgba,
+                                               (gsize)width * height * 4);
+        browser_surface_native_to_rgba(surface, gl_read_buf,
+                                       width * surface->fmt.bytes_per_pixel,
+                                       width, height, rgba);
+        gl_read_buf = rgba;
+    }
+#endif
 
     int prev_unpack_alignment;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_unpack_alignment);
@@ -1283,8 +1580,31 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
         glFramebufferTexture2D(GL_FRAMEBUFFER, entry.fmt.gl_attachment,
                                GL_TEXTURE_2D, found->gl_buffer, 0);
-        assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
-               GL_FRAMEBUFFER_COMPLETE);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        browser_detach_mismatched_zeta(r);
+#endif
+        pgraph_gl_set_current_surface_draw_buffer(r);
+        GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
+            if (browser_incomplete_surface_framebuffer_warnings < 8) {
+                browser_incomplete_surface_framebuffer_warnings++;
+                fprintf(stderr,
+                        "Browser GL: skipping incomplete surface framebuffer "
+                        "status=0x%x kind=%s attachment=0x%x internal=0x%x "
+                        "format=0x%x type=0x%x width=%u height=%u\n",
+                        framebuffer_status, color ? "color" : "zeta",
+                        entry.fmt.gl_attachment, entry.fmt.gl_internal_format,
+                        entry.fmt.gl_format, entry.fmt.gl_type,
+                        found->width, found->height);
+            }
+            surface->buffer_dirty = true;
+            pgraph_gl_surface_invalidate(d, found);
+            surface->buffer_dirty = false;
+            return;
+        }
+#endif
+        assert(framebuffer_status == GL_FRAMEBUFFER_COMPLETE);
 
         surface->buffer_dirty = false;
     }

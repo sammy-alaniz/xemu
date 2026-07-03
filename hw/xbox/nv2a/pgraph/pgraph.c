@@ -199,10 +199,11 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
 
         pg->waiting_for_context_switch = true;
         qemu_mutex_unlock(&pg->lock);
-        bql_lock();
-        pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
-        nv2a_update_irq(d);
-        bql_unlock();
+        {
+            BQL_LOCK_GUARD();
+            pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
+            nv2a_update_irq(d);
+        }
         qemu_mutex_lock(&pg->lock);
     }
 }
@@ -850,9 +851,10 @@ DEF_METHOD(NV097, NO_OPERATION)
     pg->waiting_for_nop = true;
 
     qemu_mutex_unlock(&pg->lock);
-    bql_lock();
-    nv2a_update_irq(d);
-    bql_unlock();
+    {
+        BQL_LOCK_GUARD();
+        nv2a_update_irq(d);
+    }
     qemu_mutex_lock(&pg->lock);
 }
 

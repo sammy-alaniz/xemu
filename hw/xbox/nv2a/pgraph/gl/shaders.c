@@ -29,6 +29,27 @@
 #include "debug.h"
 #include "renderer.h"
 
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+static bool browser_gl_drain_errors(const char *where)
+{
+    static unsigned warning_count;
+    bool had_error = false;
+    GLenum error;
+
+    while ((error = glGetError()) != GL_NO_ERROR) {
+        had_error = true;
+        if (warning_count < 8) {
+            warning_count++;
+            fprintf(stderr,
+                    "Browser GL: drained stale error before %s: 0x%x\n",
+                    where, error);
+        }
+    }
+
+    return had_error;
+}
+#endif
+
 static GLenum get_gl_primitive_mode(enum ShaderPolygonMode polygon_mode, enum ShaderPrimitiveMode primitive_mode)
 {
     switch (primitive_mode) {
@@ -306,7 +327,13 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg)
 
 bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
 {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (browser_gl_drain_errors(__func__)) {
+        return false;
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     if (!binding->program) {
         return false;
@@ -670,6 +697,11 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
 
     GLint program_size;
     glGetProgramiv(binding->gl_program, GL_PROGRAM_BINARY_LENGTH, &program_size);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (browser_gl_drain_errors("pgraph_gl_shader_cache_to_disk:length")) {
+        return;
+    }
+#endif
 
     if (binding->program) {
         g_free(binding->program);
@@ -685,7 +717,15 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
     GLsizei program_size_copied;
     glGetProgramBinary(binding->gl_program, program_size, &program_size_copied,
                        &binding->program_format, binding->program);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (browser_gl_drain_errors("pgraph_gl_shader_cache_to_disk:binary")) {
+        g_free(binding->program);
+        binding->program = NULL;
+        return;
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     binding->program_size = program_size_copied;
     binding->cached = true;

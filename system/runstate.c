@@ -905,6 +905,19 @@ int qemu_main_loop(void)
     return status;
 }
 
+int qemu_main_loop_nonblocking(unsigned sleep_us)
+{
+    int status = EXIT_SUCCESS;
+
+    while (!main_loop_should_exit(&status)) {
+        main_loop_wait(true);
+        if (sleep_us) {
+            g_usleep(sleep_us);
+        }
+    }
+    return status;
+}
+
 void qemu_add_exit_notifier(Notifier *notify)
 {
     notifier_list_add(&exit_notifiers, notify);

@@ -3,5 +3,5 @@ c_args = ['-pthread','-fPIC']
 cpp_args = ['-pthread','-fPIC']
 objc_args = ['-pthread','-fPIC']
 # Pthreads require -pthread during configuration as well as the final link.
-c_link_args = ['-pthread','-sASYNCIFY=1','-sASSERTIONS=0','-sFORCE_FILESYSTEM','-sALLOW_TABLE_GROWTH','-sTOTAL_MEMORY=2GB','-sWASM_BIGINT','-sEXPORT_ES6=1','-sASYNCIFY_IMPORTS=ffi_call_js','-sEXPORTED_RUNTIME_METHODS=addFunction,removeFunction,TTY,FS,NODEFS','-lnodefs.js']
-cpp_link_args = ['-pthread','-sASYNCIFY=1','-sASSERTIONS=0','-sFORCE_FILESYSTEM','-sALLOW_TABLE_GROWTH','-sTOTAL_MEMORY=2GB','-sWASM_BIGINT','-sEXPORT_ES6=1','-sASYNCIFY_IMPORTS=ffi_call_js','-sEXPORTED_RUNTIME_METHODS=addFunction,removeFunction,TTY,FS,NODEFS','-lnodefs.js']
+c_link_args = ['-pthread','-sASYNCIFY=1','-sASSERTIONS=0','-sFORCE_FILESYSTEM','-sALLOW_TABLE_GROWTH','-sTOTAL_MEMORY=1536MB','-sWASM_BIGINT','-sEXPORT_ES6=1','-sASYNCIFY_IMPORTS=ffi_call_js','-sEXPORTED_RUNTIME_METHODS=addFunction,removeFunction,TTY,FS,NODEFS','-lnodefs.js']
+cpp_link_args = ['-pthread','-sASYNCIFY=1','-sASSERTIONS=0','-sFORCE_FILESYSTEM','-sALLOW_TABLE_GROWTH','-sTOTAL_MEMORY=1536MB','-sWASM_BIGINT','-sEXPORT_ES6=1','-sASYNCIFY_IMPORTS=ffi_call_js','-sEXPORTED_RUNTIME_METHODS=addFunction,removeFunction,TTY,FS,NODEFS','-lnodefs.js']

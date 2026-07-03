@@ -211,6 +211,150 @@ int nv2a_get_screen_off(void)
     return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
 }
 
+bool nv2a_get_vram_display_size(int *width, int *height)
+{
+    if (!g_nv2a || !width || !height) {
+        return false;
+    }
+
+    g_nv2a->vga.get_resolution(&g_nv2a->vga, width, height);
+    return *width > 0 && *height > 0;
+}
+
+static void rgba_from_rgb565(uint8_t *dst, uint16_t pixel)
+{
+    uint8_t r = (pixel >> 11) & 0x1f;
+    uint8_t g = (pixel >> 5) & 0x3f;
+    uint8_t b = pixel & 0x1f;
+
+    dst[0] = (r << 3) | (r >> 2);
+    dst[1] = (g << 2) | (g >> 4);
+    dst[2] = (b << 3) | (b >> 2);
+    dst[3] = 255;
+}
+
+static void rgba_from_rgb555(uint8_t *dst, uint16_t pixel)
+{
+    uint8_t r = (pixel >> 10) & 0x1f;
+    uint8_t g = (pixel >> 5) & 0x1f;
+    uint8_t b = pixel & 0x1f;
+
+    dst[0] = (r << 3) | (r >> 2);
+    dst[1] = (g << 3) | (g >> 2);
+    dst[2] = (b << 3) | (b >> 2);
+    dst[3] = 255;
+}
+
+bool nv2a_copy_vram_display_frame(uint8_t *rgba, int width, int height)
+{
+    NV2AState *d = g_nv2a;
+    VGADisplayParams params;
+    static unsigned browser_vram_warning_count;
+    int actual_width;
+    int actual_height;
+    int bpp;
+    int bytes_per_pixel;
+    uint64_t base;
+    uint64_t stride;
+    uint64_t required;
+    uint64_t vram_size;
+
+    if (!d || !rgba || width <= 0 || height <= 0) {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+        if (browser_vram_warning_count < 8) {
+            browser_vram_warning_count++;
+            fprintf(stderr,
+                    "Browser display: vram copy skipped reason=bad-input "
+                    "has_nv2a=%s has_rgba=%s width=%d height=%d\n",
+                    d ? "yes" : "no", rgba ? "yes" : "no", width, height);
+        }
+#endif
+        return false;
+    }
+
+    d->vga.get_resolution(&d->vga, &actual_width, &actual_height);
+    if (actual_width <= 0 || actual_height <= 0) {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+        if (browser_vram_warning_count < 8) {
+            browser_vram_warning_count++;
+            fprintf(stderr,
+                    "Browser display: vram copy skipped reason=bad-resolution "
+                    "actual_width=%d actual_height=%d\n",
+                    actual_width, actual_height);
+        }
+#endif
+        return false;
+    }
+
+    width = MIN(width, actual_width);
+    height = MIN(height, actual_height);
+    bpp = d->vga.get_bpp(&d->vga);
+    if (bpp != 15 && bpp != 16 && bpp != 32) {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+        if (browser_vram_warning_count < 8) {
+            browser_vram_warning_count++;
+            fprintf(stderr,
+                    "Browser display: vram copy skipped reason=unsupported-bpp "
+                    "bpp=%d cr28=0x%02x general_control=0x%08x "
+                    "width=%d height=%d\n",
+                    bpp, d->vga.cr[0x28], d->pramdac.general_control,
+                    actual_width, actual_height);
+        }
+#endif
+        return false;
+    }
+
+    d->vga.get_params(&d->vga, &params);
+    bytes_per_pixel = bpp == 32 ? 4 : 2;
+    base = d->pcrtc.start;
+    stride = params.line_offset ? params.line_offset :
+        (uint64_t)actual_width * bytes_per_pixel;
+    required = base + (uint64_t)(height - 1) * stride +
+        (uint64_t)width * bytes_per_pixel;
+    vram_size = memory_region_size(d->vram);
+    if (required > vram_size) {
+#ifdef CONFIG_XEMU_BROWSER_BOOT
+        if (browser_vram_warning_count < 8) {
+            browser_vram_warning_count++;
+            fprintf(stderr,
+                    "Browser display: vram copy skipped reason=out-of-bounds "
+                    "base=0x%" PRIx64 " stride=%" PRIu64
+                    " required=%" PRIu64 " vram_size=%" PRIu64
+                    " width=%d height=%d bpp=%d\n",
+                    base, stride, required, vram_size, width, height, bpp);
+        }
+#endif
+        return false;
+    }
+
+    for (int y = 0; y < height; y++) {
+        const uint8_t *src = d->vram_ptr + base + (uint64_t)y * stride;
+        uint8_t *dst = rgba + (uint64_t)y * width * 4;
+
+        for (int x = 0; x < width; x++) {
+            if (bpp == 32) {
+                const uint8_t *pixel = src + x * 4;
+
+                dst[x * 4 + 0] = pixel[2];
+                dst[x * 4 + 1] = pixel[1];
+                dst[x * 4 + 2] = pixel[0];
+                dst[x * 4 + 3] = 255;
+            } else {
+                const uint8_t *pixel = src + x * 2;
+                uint16_t value = (uint16_t)pixel[0] | ((uint16_t)pixel[1] << 8);
+
+                if (bpp == 16) {
+                    rgba_from_rgb565(dst + x * 4, value);
+                } else {
+                    rgba_from_rgb555(dst + x * 4, value);
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 static void nv2a_vga_gfx_update(void *opaque)
 {
     VGACommonState *vga = opaque;

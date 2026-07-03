@@ -135,6 +135,9 @@ void pgraph_gl_draw_begin(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    static unsigned browser_missing_surface_binding_warnings;
+#endif
 
     NV2A_GL_DGROUP_BEGIN("NV097_SET_BEGIN_END: 0x%x", pg->primitive_mode);
 
@@ -155,6 +158,20 @@ void pgraph_gl_draw_begin(NV2AState *d)
         return;
     }
 
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (!(r->color_binding || r->zeta_binding)) {
+        if (browser_missing_surface_binding_warnings < 8) {
+            browser_missing_surface_binding_warnings++;
+            fprintf(stderr,
+                    "Browser GL: skipping draw with no complete surface "
+                    "binding color_write=%s depth_test=%s stencil_test=%s\n",
+                    color_write ? "yes" : "no",
+                    depth_test ? "yes" : "no",
+                    stencil_test ? "yes" : "no");
+        }
+        return;
+    }
+#endif
     assert(r->color_binding || r->zeta_binding);
 
     pgraph_gl_bind_textures(d);

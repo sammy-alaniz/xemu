@@ -21,10 +21,15 @@
 #ifndef HW_NV2A_H
 #define HW_NV2A_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
 void nv2a_context_init(void);
 int nv2a_get_framebuffer_surface(void);
 void nv2a_release_framebuffer_surface(void);
+bool nv2a_get_vram_display_size(int *width, int *height);
+bool nv2a_copy_vram_display_frame(uint8_t *rgba, int width, int height);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);

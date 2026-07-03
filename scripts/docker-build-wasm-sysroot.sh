@@ -139,7 +139,8 @@ mkdir -p "${repo_root}/${sysroot_dir}"
                 touch .xemu-emscripten-6-helpers
             )
         fi
-        if [ ! -f "${prefix}/.xemu-libffi-emscripten-6-helpers" ]; then
+        libffi_stamp="${prefix}/.xemu-libffi-emscripten-6-helpers-wasm-bigint"
+        if [ ! -f "${libffi_stamp}" ]; then
             rm -f "${prefix}/lib/pkgconfig/libffi.pc"
         fi
 
@@ -148,6 +149,7 @@ mkdir -p "${repo_root}/${sysroot_dir}"
             mkdir -p build/libffi
             (
                 cd build/libffi
+                export CFLAGS="${CFLAGS:-} -DWASM_BIGINT"
                 emconfigure ../../src/libffi-${XEMU_LIBFFI_VERSION}/configure \
                     --host=wasm32-unknown-emscripten \
                     --prefix="${prefix}" \
@@ -156,7 +158,7 @@ mkdir -p "${repo_root}/${sysroot_dir}"
                     --disable-docs
                 emmake make -j"${JOBS:-4}"
                 emmake make install
-                touch "${prefix}/.xemu-libffi-emscripten-6-helpers"
+                touch "${libffi_stamp}"
             )
         fi
 

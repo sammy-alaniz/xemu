@@ -222,6 +222,15 @@ void xemu_browser_glBufferData(GLenum target, GLsizeiptr size,
                                const void *data, GLenum usage);
 void xemu_browser_glBufferSubData(GLenum target, GLintptr offset,
                                   GLsizeiptr size, const void *data);
+void xemu_browser_glTexImage2D(GLenum target, GLint level, GLint internal_format,
+                               GLsizei width, GLsizei height, GLint border,
+                               GLenum format, GLenum type, const void *pixels);
+void xemu_browser_glTexImage3D(GLenum target, GLint level, GLint internal_format,
+                               GLsizei width, GLsizei height, GLsizei depth,
+                               GLint border, GLenum format, GLenum type,
+                               const void *pixels);
+GLuint xemu_browser_glCreateProgram(void);
+GLuint xemu_browser_glCreateShader(GLenum shader_type);
 GLenum xemu_browser_glGetError(void);
 void xemu_browser_glGetIntegerv(GLenum pname, GLint *data);
 const GLubyte *xemu_browser_glGetString(GLenum name);
@@ -236,6 +245,10 @@ const GLubyte *xemu_browser_glGetString(GLenum name);
 #define glBindVertexArray xemu_browser_glBindVertexArray
 #define glBufferData xemu_browser_glBufferData
 #define glBufferSubData xemu_browser_glBufferSubData
+#define glTexImage2D xemu_browser_glTexImage2D
+#define glTexImage3D xemu_browser_glTexImage3D
+#define glCreateProgram xemu_browser_glCreateProgram
+#define glCreateShader xemu_browser_glCreateShader
 #define glGetError xemu_browser_glGetError
 #define glGetIntegerv xemu_browser_glGetIntegerv
 #define glGetString xemu_browser_glGetString

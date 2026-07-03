@@ -68,7 +68,11 @@ static void *qemu_main_thread(void *opaque)
     xemu_boot_trace_mark("b0 thread=qemu-main started");
     qemu_init(g_argc, g_argv);
     xemu_browser_display_init();
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    exit_status = qemu_main_loop_nonblocking(1000);
+#else
     exit_status = qemu_main_loop();
+#endif
     qatomic_set(&qemu_exiting, true);
     bql_unlock();
 #ifdef XBOX

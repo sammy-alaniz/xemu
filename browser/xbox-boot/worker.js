@@ -14,6 +14,7 @@ const fixturePaths = {
 const browserBlockKeys = new Set(["hdd", "dvd"]);
 const blockSnapshotDbName = "xemu.browserBoot.blockSnapshots.v1";
 const blockSnapshotStoreName = "snapshots";
+const blackDisplayFrameIntervalMs = 5000;
 
 function makeCanvasStyle() {
   const values = new Map();
@@ -119,6 +120,22 @@ function installEmscriptenCanvas(offscreenCanvas) {
 function postError(message) {
   self.postMessage({ type: "error", message: String(message) });
 }
+
+function postWorkerLog(line) {
+  self.postMessage({ type: "log", stream: "worker", message: String(line) });
+}
+
+globalThis.addEventListener("error", (event) => {
+  const error = event.error;
+  const stack = error && error.stack ? error.stack : "";
+  postWorkerLog(`BROWSER_WORKER_ERROR message=${JSON.stringify(event.message || String(error || event))}${stack ? ` stack=${JSON.stringify(stack)}` : ""}`);
+});
+
+globalThis.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  const stack = reason && reason.stack ? reason.stack : "";
+  postWorkerLog(`BROWSER_WORKER_REJECTION message=${JSON.stringify(reason && reason.message ? reason.message : String(reason))}${stack ? ` stack=${JSON.stringify(stack)}` : ""}`);
+});
 
 function errorToMessage(error) {
   if (!error) {
@@ -510,6 +527,10 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets, canvas }
   let eepromPath = eepromPathForAssets(assets);
   let timeout = null;
   let doneSent = false;
+  let displayFrameSerial = 0;
+  let lastBlackDisplayPostMs = 0;
+  let displayHasPostedNonblack = false;
+  let displayHasLoggedNonblack = false;
 
   const finishRun = (result, reason) => {
     if (doneSent) {
@@ -566,8 +587,47 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets, canvas }
       }
     },
   };
-  moduleArg.xemuBrowserDisplayUpdate = (ptr, width, height, stride) => {
-    const heap = moduleArg.HEAPU8;
+  moduleArg.xemuBrowserDisplayUpdate = (ptr, width, height, stride, source = "unknown") => {
+    const heap = moduleArg.HEAPU8 || globalThis.xemuBrowserDisplayHeap || globalThis.xemuBrowserBlockHeap;
+    if (!heap) {
+      throw new Error("display heap unavailable");
+    }
+    source = String(source || "unknown");
+    displayFrameSerial += 1;
+    let nonblack = false;
+    const sampleStride = 1024 * 4;
+    const fullScan = !displayHasPostedNonblack && displayFrameSerial % 30 === 0;
+
+    for (let y = 0; y < height && !nonblack; y++) {
+      const row = ptr + y * stride;
+      const rowEnd = row + width * 4;
+      const step = fullScan ? 4 : sampleStride;
+
+      for (let offset = row; offset < rowEnd; offset += step) {
+        if (heap[offset] !== 0 || heap[offset + 1] !== 0 || heap[offset + 2] !== 0) {
+          nonblack = true;
+          break;
+        }
+      }
+    }
+
+    if (!nonblack) {
+      const now = Date.now();
+      if (displayFrameSerial === 1 || displayFrameSerial % 300 === 0) {
+        postLog("display", `BROWSER_WORKER_DISPLAY frame=${displayFrameSerial} source=${source} width=${width} height=${height} nonblack=no forwarded=${lastBlackDisplayPostMs && now - lastBlackDisplayPostMs < blackDisplayFrameIntervalMs ? "no" : "yes"}`);
+      }
+      if (lastBlackDisplayPostMs && now - lastBlackDisplayPostMs < blackDisplayFrameIntervalMs) {
+        return;
+      }
+      lastBlackDisplayPostMs = now;
+    } else {
+      if (!displayHasLoggedNonblack) {
+        postLog("display", `BROWSER_WORKER_DISPLAY frame=${displayFrameSerial} source=${source} width=${width} height=${height} nonblack=yes forwarded=yes`);
+        displayHasLoggedNonblack = true;
+      }
+      displayHasPostedNonblack = true;
+    }
+
     const pixels = new Uint8ClampedArray(width * height * 4);
 
     for (let y = 0; y < height; y++) {
@@ -580,9 +640,12 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets, canvas }
       type: "display-frame",
       width,
       height,
+      source,
+      nonblack,
       pixels: pixels.buffer,
     }, [pixels.buffer]);
   };
+  globalThis.xemuBrowserDisplayUpdate = moduleArg.xemuBrowserDisplayUpdate;
   installBrowserBlockCallbacks(moduleArg, browserBlocks);
 
   moduleArg.preRun = [() => {

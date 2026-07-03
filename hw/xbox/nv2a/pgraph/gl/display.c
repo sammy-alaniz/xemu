@@ -24,8 +24,98 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
 #include "renderer.h"
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+#include "ui/xemu-browser-display.h"
+#endif
 
 #include <math.h>
+
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+#define XEMU_BROWSER_DISPLAY_MAX_WIDTH 4096
+#define XEMU_BROWSER_DISPLAY_MAX_HEIGHT 4096
+#define XEMU_BROWSER_DISPLAY_INTERVAL_US (G_USEC_PER_SEC / 15)
+
+static uint8_t *browser_display_readback;
+static uint8_t *browser_display_rgba;
+static int browser_display_width;
+static int browser_display_height;
+static int64_t browser_display_last_post_us;
+static unsigned browser_display_post_count;
+static bool browser_display_nonblack_logged;
+
+static bool browser_display_ensure_buffers(int width, int height)
+{
+    gsize pixel_count;
+
+    if (width <= 0 || height <= 0 ||
+        width > XEMU_BROWSER_DISPLAY_MAX_WIDTH ||
+        height > XEMU_BROWSER_DISPLAY_MAX_HEIGHT) {
+        return false;
+    }
+
+    if (browser_display_readback &&
+        browser_display_width == width &&
+        browser_display_height == height) {
+        return true;
+    }
+
+    pixel_count = (gsize)width * (gsize)height;
+    browser_display_readback = g_realloc_n(browser_display_readback,
+                                           pixel_count, 4);
+    browser_display_rgba = g_realloc_n(browser_display_rgba, pixel_count, 4);
+    browser_display_width = width;
+    browser_display_height = height;
+    return true;
+}
+
+static void browser_display_post_current_frame(int width, int height)
+{
+    int64_t now = g_get_monotonic_time();
+    bool nonblack = false;
+
+    if (browser_display_last_post_us &&
+        now - browser_display_last_post_us < XEMU_BROWSER_DISPLAY_INTERVAL_US) {
+        return;
+    }
+    if (!browser_display_ensure_buffers(width, height)) {
+        return;
+    }
+
+    browser_display_last_post_us = now;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                 browser_display_readback);
+
+    for (int y = 0; y < height; y++) {
+        memcpy(browser_display_rgba + y * width * 4,
+               browser_display_readback + (height - 1 - y) * width * 4,
+               width * 4);
+    }
+
+    for (int offset = 0; offset < width * height * 4; offset += 4) {
+        if (browser_display_rgba[offset] ||
+            browser_display_rgba[offset + 1] ||
+            browser_display_rgba[offset + 2]) {
+            nonblack = true;
+            break;
+        }
+    }
+
+    browser_display_post_count++;
+    if (browser_display_post_count == 1 ||
+        (nonblack && !browser_display_nonblack_logged) ||
+        browser_display_post_count % 300 == 0) {
+        fprintf(stderr,
+                "Browser GL: readback frame=%u width=%d height=%d "
+                "nonblack=%s\n",
+                browser_display_post_count, width, height,
+                nonblack ? "yes" : "no");
+    }
+    browser_display_nonblack_logged |= nonblack;
+    xemu_browser_display_post_frame("gl-readback", width, height, width * 4,
+                                    browser_display_rgba);
+}
+#endif
 
 void pgraph_gl_init_display(NV2AState *d)
 {
@@ -373,6 +463,9 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    browser_display_post_current_frame(width, height);
+#endif
 
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, 0, 0);
@@ -389,14 +482,53 @@ static void gl_fence(void)
 
 void pgraph_gl_sync(NV2AState *d)
 {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    static unsigned browser_sync_no_surface_count;
+    static bool browser_sync_surface_logged;
+#endif
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
 
-    SurfaceBinding *surface = pgraph_gl_surface_get_within(d, d->pcrtc.start + vga_display_params.line_offset);
+    SurfaceBinding *surface = pgraph_gl_surface_get_within(
+        d, d->pcrtc.start + vga_display_params.line_offset);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (surface == NULL && vga_display_params.line_offset) {
+        surface = pgraph_gl_surface_get_within(d, d->pcrtc.start);
+        if (surface != NULL) {
+            fprintf(stderr,
+                    "Browser GL: sync using display surface at pcrtc.start "
+                    "start=0x%" HWADDR_PRIx " line_offset=%u\n",
+                    d->pcrtc.start, vga_display_params.line_offset);
+        }
+    }
+#endif
     if (surface == NULL || !surface->color || !surface->width || !surface->height) {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        if (browser_sync_no_surface_count < 8 ||
+            browser_sync_no_surface_count % 300 == 0) {
+            fprintf(stderr,
+                    "Browser GL: sync skipped reason=no-display-surface "
+                    "count=%u start=0x%" HWADDR_PRIx
+                    " line_offset=%u surface=%s\n",
+                    browser_sync_no_surface_count + 1, d->pcrtc.start,
+                    vga_display_params.line_offset,
+                    surface ? "incomplete" : "missing");
+        }
+        browser_sync_no_surface_count++;
+#endif
         qemu_event_set(&d->pgraph.sync_complete);
         return;
     }
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (!browser_sync_surface_logged) {
+        fprintf(stderr,
+                "Browser GL: sync display surface addr=0x%" HWADDR_PRIx
+                " width=%u height=%u pitch=%u format=0x%x\n",
+                surface->vram_addr, surface->width, surface->height,
+                surface->pitch, surface->shape.color_format);
+        browser_sync_surface_logged = true;
+    }
+#endif
 
     /* FIXME: Sanity check surface dimensions */
 
@@ -431,6 +563,17 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
 
     SurfaceBinding *surface = pgraph_gl_surface_get_within(
         d, d->pcrtc.start + vga_display_params.line_offset);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    if (surface == NULL && vga_display_params.line_offset) {
+        surface = pgraph_gl_surface_get_within(d, d->pcrtc.start);
+        if (surface != NULL) {
+            fprintf(stderr,
+                    "Browser GL: framebuffer lookup using pcrtc.start "
+                    "start=0x%" HWADDR_PRIx " line_offset=%u\n",
+                    d->pcrtc.start, vga_display_params.line_offset);
+        }
+    }
+#endif
     if (surface == NULL || !surface->color) {
         qemu_mutex_unlock(&d->pfifo.lock);
         return 0;
