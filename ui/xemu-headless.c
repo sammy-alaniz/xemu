@@ -79,6 +79,10 @@ static void *qemu_main_thread(void *opaque)
     qemu_cleanup(exit_status);
     bql_unlock();
 
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    rcu_unregister_thread();
+#endif
+
     return NULL;
 }
 
@@ -138,7 +142,11 @@ int main(int argc, char **argv)
         exit(1);
     }
 
+#ifdef CONFIG_OPENGL
+    g_config.display.renderer = CONFIG_DISPLAY_RENDERER_OPENGL;
+#else
     g_config.display.renderer = CONFIG_DISPLAY_RENDERER_NULL;
+#endif
     g_config.general.updates.check = false;
     g_config.general.show_welcome = false;
 

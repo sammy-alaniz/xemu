@@ -28,6 +28,7 @@
 #include "qemu/lru.h"
 
 #include "hw/hw.h"
+#include "cpu.h"
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/nv2a_regs.h"

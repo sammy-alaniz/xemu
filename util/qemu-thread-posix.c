@@ -22,6 +22,11 @@
 #include <pthread_np.h>
 #endif
 
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT) && \
+    defined(CONFIG_OPENGL)
+#include <emscripten/threading.h>
+#endif
+
 static bool name_threads;
 
 void qemu_thread_naming(bool enable)
@@ -415,6 +420,16 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     if (mode == QEMU_THREAD_DETACHED) {
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     }
+
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT) && \
+    defined(CONFIG_OPENGL)
+    const char *canvas_selector = "";
+    err = emscripten_pthread_attr_settransferredcanvases(
+        &attr, canvas_selector);
+    if (err) {
+        error_exit(err, "emscripten_pthread_attr_settransferredcanvases");
+    }
+#endif
 
     /* Leave signal handling to the iothread.  */
     sigfillset(&set);

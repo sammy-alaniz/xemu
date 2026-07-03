@@ -15,8 +15,121 @@ const browserBlockKeys = new Set(["hdd", "dvd"]);
 const blockSnapshotDbName = "xemu.browserBoot.blockSnapshots.v1";
 const blockSnapshotStoreName = "snapshots";
 
+function makeCanvasStyle() {
+  const values = new Map();
+  return {
+    setProperty(name, value) {
+      values.set(name, value);
+      this[name] = value;
+    },
+    removeProperty(name) {
+      values.delete(name);
+      delete this[name];
+    },
+  };
+}
+
+function installEmscriptenCanvas(offscreenCanvas) {
+  if (!offscreenCanvas) {
+    postError("WebGL canvas was not transferred to the worker.");
+    return null;
+  }
+
+  const canvas = {
+    id: "canvas",
+    nodeName: "CANVAS",
+    style: makeCanvasStyle(),
+    parentNode: null,
+    get width() {
+      return offscreenCanvas.width;
+    },
+    set width(value) {
+      offscreenCanvas.width = value;
+    },
+    get height() {
+      return offscreenCanvas.height;
+    },
+    set height(value) {
+      offscreenCanvas.height = value;
+    },
+    getContext(type, attributes) {
+      return offscreenCanvas.getContext(type, attributes);
+    },
+    transferControlToOffscreen() {
+      if (this.controlTransferredOffscreen) {
+        throw new Error("canvas control was already transferred");
+      }
+      this.controlTransferredOffscreen = true;
+      return offscreenCanvas;
+    },
+    getBoundingClientRect() {
+      return {
+        left: 0,
+        top: 0,
+        right: offscreenCanvas.width,
+        bottom: offscreenCanvas.height,
+        width: offscreenCanvas.width,
+        height: offscreenCanvas.height,
+      };
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  canvas.parentNode = {
+    insertBefore() {},
+    removeChild() {},
+    appendChild() {},
+  };
+
+  const documentShim = {
+    body: {
+      clientWidth: offscreenCanvas.width,
+      clientHeight: offscreenCanvas.height,
+      appendChild() {},
+      removeChild() {},
+      requestPointerLock: null,
+    },
+    querySelector(selector) {
+      return selector === "#canvas" || selector === "canvas" ? canvas : null;
+    },
+    createElement(name) {
+      return String(name).toLowerCase() === "canvas" ? canvas : {};
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  if (!globalThis.document) {
+    globalThis.document = documentShim;
+  }
+  if (!globalThis.window) {
+    globalThis.window = globalThis;
+  }
+  if (typeof globalThis.matchMedia !== "function") {
+    globalThis.matchMedia = () => ({
+      matches: false,
+      addEventListener() {},
+      removeEventListener() {},
+    });
+  }
+
+  return canvas;
+}
+
 function postError(message) {
   self.postMessage({ type: "error", message: String(message) });
+}
+
+function errorToMessage(error) {
+  if (!error) {
+    return "unknown error";
+  }
+  const message = error.message ? String(error.message) : "";
+  const stack = error.stack ? String(error.stack) : "";
+  if (message && stack && !stack.includes(message)) {
+    return `${message}\n${stack}`;
+  }
+  return stack || message || String(error);
 }
 
 function bytesToBase64(bytes) {
@@ -43,7 +156,10 @@ skip_boot_anim = false
 check = false
 
 [display]
-renderer = "NULL"
+renderer = "OPENGL"
+
+[perf]
+cache_shaders = false
 
 [sys]
 mem_limit = "64"
@@ -377,7 +493,7 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
   globalThis.xemuBrowserBlockClose = moduleArg.xemuBrowserBlockClose;
 }
 
-async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
+async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets, canvas }) {
   const validationError = validateAssets(assets);
   if (validationError) {
     self.postMessage({ type: "done", result: "invalid-assets" });
@@ -388,6 +504,7 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
 
   const moduleUrl = new URL(`${buildDir.replace(/\/$/, "")}/qemu-system-i386.js`, self.location.href).href;
   const wasmUrl = new URL(`${buildDir.replace(/\/$/, "")}/qemu-system-i386.wasm`, self.location.href).href;
+  const emscriptenCanvas = installEmscriptenCanvas(canvas);
   const { default: Factory } = await import(moduleUrl);
   let moduleFS = null;
   let eepromPath = eepromPathForAssets(assets);
@@ -435,6 +552,7 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
       return new URL(`${buildDir.replace(/\/$/, "")}/${path}`, self.location.href).href;
     },
     arguments: moduleArguments,
+    canvas: emscriptenCanvas,
     print(line) {
       postLog("stdout", line);
     },
@@ -487,7 +605,7 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
     await new Promise(() => {});
   } catch (error) {
     clearTimeout(timeout);
-    postError(error && error.stack ? error.stack : error);
+    postError(errorToMessage(error));
     finishRun("fail", "error");
   }
 }
@@ -497,7 +615,7 @@ self.onmessage = (event) => {
     return;
   }
   runBoot(event.data).catch((error) => {
-    postError(error && error.stack ? error.stack : error);
+    postError(errorToMessage(error));
     self.postMessage({ type: "done", result: "fail" });
   });
 };

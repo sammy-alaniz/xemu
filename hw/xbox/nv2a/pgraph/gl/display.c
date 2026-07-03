@@ -42,7 +42,13 @@ void pgraph_gl_init_display(NV2AState *d)
     r->gl_display_buffer_type = 0;
 
     const char *vs =
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+#else
         "#version 330\n"
+#endif
         "void main()\n"
         "{\n"
         "    float x = -1.0 + float((gl_VertexID & 1) << 2);\n"
@@ -52,7 +58,13 @@ void pgraph_gl_init_display(NV2AState *d)
     /* FIXME: improve interlace handling, pvideo */
 
     const char *fs =
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+#else
         "#version 330\n"
+#endif
         "uniform sampler2D tex;\n"
         "uniform bool pvideo_enable;\n"
         "uniform sampler2D pvideo_tex;\n"
@@ -67,8 +79,8 @@ void pgraph_gl_init_display(NV2AState *d)
         "void main()\n"
         "{\n"
         "    vec2 texCoord = gl_FragCoord.xy/display_size;\n"
-        "    float rel = display_size.y/textureSize(tex, 0).y/line_offset;\n"
-        "    texCoord.y = rel*(1.0f - texCoord.y);\n"
+        "    float rel = display_size.y/float(textureSize(tex, 0).y)/line_offset;\n"
+        "    texCoord.y = rel*(1.0 - texCoord.y);\n"
         "    out_Color.rgba = texture(tex, texCoord);\n"
         "    if (pvideo_enable) {\n"
         "        vec2 screenCoord = gl_FragCoord.xy - 0.5;\n"
@@ -77,7 +89,7 @@ void pgraph_gl_init_display(NV2AState *d)
         "                           greaterThan(screenCoord, output_region.zw));\n"
         "        if (!any(clip) && (!pvideo_color_key_enable || out_Color.rgb == pvideo_color_key)) {\n"
         "            vec2 out_xy = (screenCoord - pvideo_pos.xy) * pvideo_scale.z;\n"
-        "            vec2 in_st = (pvideo_in_pos + out_xy * pvideo_scale.xy) / textureSize(pvideo_tex, 0);\n"
+        "            vec2 in_st = (pvideo_in_pos + out_xy * pvideo_scale.xy) / vec2(textureSize(pvideo_tex, 0));\n"
         "            in_st.y *= -1.0;\n"
         "            out_Color.rgba = texture(pvideo_tex, in_st);\n"
         "        }\n"
@@ -98,6 +110,9 @@ void pgraph_gl_init_display(NV2AState *d)
 
     glGenVertexArrays(1, &r->disp_rndr.vao);
     glBindVertexArray(r->disp_rndr.vao);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    glo_set_current(g_nv2a_context_display);
+#endif
     glGenBuffers(1, &r->disp_rndr.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, r->disp_rndr.vbo);
     glBufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);

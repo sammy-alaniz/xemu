@@ -170,6 +170,17 @@ function drawDisplayFrame({ width, height, pixels }) {
   context.putImageData(image, 0, 0);
 }
 
+function createGlCanvasTransfer() {
+  if (typeof OffscreenCanvas !== "function") {
+    appendLog("WebGL worker canvas unavailable: OffscreenCanvas is not supported.");
+    return null;
+  }
+
+  const offscreen = new OffscreenCanvas(640, 480);
+  offscreen.id = "canvas";
+  return offscreen;
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -393,13 +404,22 @@ async function runWithAssets(selectedAssets, runMode) {
     appendLog("Interactive run started.");
   }
 
+  const glCanvas = createGlCanvasTransfer();
+  const transferList = selectedAssets
+    .filter((asset) => asset.buffer)
+    .map((asset) => asset.buffer);
+  if (glCanvas) {
+    transferList.push(glCanvas);
+  }
+
   worker.postMessage({
     type: "start",
     buildDir,
     timeoutMs,
     smokeTest,
     assets: selectedAssets,
-  }, selectedAssets.filter((asset) => asset.buffer).map((asset) => asset.buffer));
+    canvas: glCanvas,
+  }, transferList);
 }
 
 async function startRun() {

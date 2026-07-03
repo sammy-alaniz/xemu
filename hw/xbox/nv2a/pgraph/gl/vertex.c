@@ -252,6 +252,10 @@ void pgraph_gl_init_buffers(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    glo_set_current(g_nv2a_context_render);
+#endif
+
     lru_init(&r->element_cache);
     r->element_cache_entries = g_malloc_n(element_cache_size, sizeof(VertexLruNode));
     assert(r->element_cache_entries != NULL);

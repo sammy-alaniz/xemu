@@ -123,7 +123,13 @@ static void init_render_to_texture(PGRAPHState *pg)
     PGRAPHGLState *r = pg->gl_renderer_state;
 
     const char *vs =
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+#else
         "#version 330\n"
+#endif
         "void main()\n"
         "{\n"
         "    float x = -1.0 + float((gl_VertexID & 1) << 2);\n"
@@ -131,13 +137,19 @@ static void init_render_to_texture(PGRAPHState *pg)
         "    gl_Position = vec4(x, y, 0, 1);\n"
         "}\n";
     const char *fs =
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+#else
         "#version 330\n"
+#endif
         "uniform sampler2D tex;\n"
         "uniform vec2 surface_size;\n"
         "layout(location = 0) out vec4 out_Color;\n"
         "void main()\n"
         "{\n"
-        "    vec2 texCoord = gl_FragCoord.xy / textureSize(tex, 0).xy;\n"
+        "    vec2 texCoord = gl_FragCoord.xy / vec2(textureSize(tex, 0));\n"
         "    out_Color.rgba = texture(tex, texCoord);\n"
         "}\n";
 
@@ -148,6 +160,9 @@ static void init_render_to_texture(PGRAPHState *pg)
 
     glGenVertexArrays(1, &r->s2t_rndr.vao);
     glBindVertexArray(r->s2t_rndr.vao);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    glo_set_current(g_nv2a_context_render);
+#endif
     glGenBuffers(1, &r->s2t_rndr.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, r->s2t_rndr.vbo);
     glBufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);

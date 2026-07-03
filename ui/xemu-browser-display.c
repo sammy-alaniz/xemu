@@ -8,12 +8,22 @@
 #include "ui/qemu-pixman.h"
 #include "ui/surface.h"
 
+#ifdef CONFIG_OPENGL
+#include "hw/xbox/nv2a/nv2a.h"
+#include <epoxy/gl.h>
+#endif
+
 #include <emscripten.h>
 
 static DisplayChangeListener browser_dcl;
 static uint8_t *rgba_pixels;
+static uint8_t *gl_pixels;
 static int rgba_width;
 static int rgba_height;
+#ifdef CONFIG_OPENGL
+static GLuint readback_fbo;
+static bool warned_gl_readback;
+#endif
 
 static void xemu_browser_display_post_frame(int width, int height,
                                             int stride, const uint8_t *data)
@@ -108,9 +118,74 @@ static void xemu_browser_display_send_surface(DisplaySurface *surface)
                                     rgba_pixels);
 }
 
+#ifdef CONFIG_OPENGL
+static bool xemu_browser_display_send_gl_frame(QemuConsole *con)
+{
+    DisplaySurface *surface = qemu_console_surface(con);
+    int width = surface ? surface_width(surface) : 0;
+    int height = surface ? surface_height(surface) : 0;
+    GLuint tex;
+    GLint previous_framebuffer = 0;
+    GLenum status;
+    bool sent = false;
+
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    tex = nv2a_get_framebuffer_surface();
+    if (!tex) {
+        nv2a_release_framebuffer_surface();
+        return false;
+    }
+
+    xemu_browser_display_ensure_rgba(width, height);
+    gl_pixels = g_realloc_n(gl_pixels, width * height, 4);
+
+    if (!readback_fbo) {
+        glGenFramebuffers(1, &readback_fbo);
+    }
+
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, readback_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, tex, 0);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status == GL_FRAMEBUFFER_COMPLETE) {
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                     gl_pixels);
+        for (int y = 0; y < height; y++) {
+            memcpy(rgba_pixels + y * width * 4,
+                   gl_pixels + (height - 1 - y) * width * 4,
+                   width * 4);
+        }
+        xemu_browser_display_post_frame(width, height, width * 4, rgba_pixels);
+        sent = true;
+    } else if (!warned_gl_readback) {
+        fprintf(stderr,
+                "Browser display: GL readback framebuffer incomplete: 0x%x\n",
+                status);
+        warned_gl_readback = true;
+    }
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, previous_framebuffer);
+    nv2a_release_framebuffer_surface();
+    return sent;
+}
+#endif
+
 static void xemu_browser_display_update(DisplayChangeListener *dcl,
                                         int x, int y, int w, int h)
 {
+#ifdef CONFIG_OPENGL
+    if (xemu_browser_display_send_gl_frame(dcl->con)) {
+        return;
+    }
+#endif
     xemu_browser_display_send_surface(qemu_console_surface(dcl->con));
 }
 
@@ -123,6 +198,12 @@ static void xemu_browser_display_switch(DisplayChangeListener *dcl,
 static void xemu_browser_display_refresh(DisplayChangeListener *dcl)
 {
     graphic_hw_update(dcl->con);
+#ifdef CONFIG_OPENGL
+    if (xemu_browser_display_send_gl_frame(dcl->con)) {
+        return;
+    }
+#endif
+    xemu_browser_display_send_surface(qemu_console_surface(dcl->con));
 }
 
 static const DisplayChangeListenerOps browser_display_ops = {

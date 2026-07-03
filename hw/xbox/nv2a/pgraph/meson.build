@@ -12,10 +12,10 @@ if have_renderdoc
 endif
 subdir('thirdparty')
 subdir('null')
-if not get_option('xemu_browser_boot')
+if not get_option('xemu_browser_boot') or host_os == 'emscripten'
   subdir('gl')
 endif
-if not get_option('xemu_browser_boot')
+if not get_option('xemu_browser_boot') or host_os == 'emscripten'
   subdir('glsl')
 endif
 if not get_option('xemu_browser_boot')

@@ -395,9 +395,27 @@ void drain_call_rcu(void)
 
 void rcu_register_thread(void)
 {
-    assert(get_ptr_rcu_reader()->ctr == 0);
+    struct rcu_reader_data *reader = get_ptr_rcu_reader();
+
+#if defined(__EMSCRIPTEN__) && defined(CONFIG_XEMU_BROWSER_BOOT)
+    if (reader->ctr != 0 || reader->depth != 0 ||
+        QLIST_IS_INSERTED(reader, node)) {
+        fprintf(stderr,
+                "Browser RCU: reset stale reader ctr=%lu depth=%u inserted=%d\n",
+                reader->ctr, reader->depth,
+                QLIST_IS_INSERTED(reader, node) ? 1 : 0);
+        qemu_mutex_lock(&rcu_registry_lock);
+        QLIST_SAFE_REMOVE(reader, node);
+        qemu_mutex_unlock(&rcu_registry_lock);
+        reader->ctr = 0;
+        reader->depth = 0;
+        reader->waiting = false;
+    }
+#else
+    assert(reader->ctr == 0);
+#endif
     qemu_mutex_lock(&rcu_registry_lock);
-    QLIST_INSERT_HEAD(&registry, get_ptr_rcu_reader(), node);
+    QLIST_INSERT_HEAD(&registry, reader, node);
     qemu_mutex_unlock(&rcu_registry_lock);
 }
 

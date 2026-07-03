@@ -820,6 +820,13 @@ add_project_arguments('-iquote', '.',
                       '-iquote', meson.current_source_dir(),
                       '-iquote', meson.current_source_dir() / 'include',
                       language: all_languages)
+if get_option('xemu_browser_boot') and host_os == 'emscripten'
+  add_project_arguments(
+    '-isystem',
+    meson.current_source_dir() / 'hw/xbox/nv2a/pgraph/thirdparty/epoxy-emscripten',
+    language: all_languages)
+  add_project_arguments('-DXBOX', language: all_languages)
+endif
 
 # If a host-specific include directory exists, list that first...
 host_include = meson.current_source_dir() / 'host/include/'
@@ -1677,7 +1684,7 @@ if not get_option('brlapi').auto() or have_system
 endif
 
 sdl = not_found
-if get_option('xemu_browser_boot')
+if get_option('xemu_browser_boot') and host_os != 'emscripten'
   sdl = not_found
 elif not get_option('sdl').auto() or have_system
   sdl = dependency('sdl3', required: false, allow_fallback: false)
@@ -1701,6 +1708,13 @@ elif not get_option('sdl').auto() or have_system
       'SDL_VIRTUAL_JOYSTICK': 'OFF',
       'SDL_X11_XTEST': 'OFF',
     })
+    if host_os == 'emscripten'
+      sdl3_cmake_opts.add_cmake_defines({
+        'EMSCRIPTEN': 'ON',
+        'SDL_PTHREADS': 'ON',
+        'SDL_PTHREADS_SEM': 'ON',
+      })
+    endif
     sdl3_sp = cmake.subproject('sdl3', options: sdl3_cmake_opts, required: get_option('sdl'))
     if sdl3_sp.found()
       sdl = sdl3_sp.dependency('SDL3-static')
@@ -1891,7 +1905,24 @@ endif
 
 epoxy = not_found
 opengl = not_found
-if get_option('xemu_browser_boot')
+if get_option('xemu_browser_boot') and host_os == 'emscripten'
+  epoxy = declare_dependency(
+    include_directories: include_directories(
+      'hw/xbox/nv2a/pgraph/thirdparty/epoxy-emscripten'))
+  opengl = declare_dependency(
+    compile_args: ['-DXEMU_BROWSER_GL_EXPERIMENT=1'],
+    link_args: [
+      '-sMAX_WEBGL_VERSION=2',
+      '-sMIN_WEBGL_VERSION=2',
+      '-sFULL_ES3=1',
+      '-sOFFSCREENCANVAS_SUPPORT=1',
+      # Emscripten defaults to "#canvas" here. Use a string that trims to
+      # empty so only threads with explicit attrs receive the GL canvas.
+      '-sOFFSCREENCANVASES_TO_PTHREAD= ',
+      '-sOFFSCREEN_FRAMEBUFFER=1',
+    ],
+    dependencies: epoxy)
+elif get_option('xemu_browser_boot')
   opengl = not_found
 elif not get_option('opengl').auto() or have_system or have_vhost_user_gpu
   epoxy = dependency('epoxy', required: true)

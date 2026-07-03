@@ -335,6 +335,13 @@ static void determine_triangle_winding_order(uint8_t *pixels, int width,
 
 void pgraph_gl_determine_gpu_properties(void)
 {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    memset(&pgraph_gl_gpu_properties, 0, sizeof(pgraph_gl_gpu_properties));
+    fprintf(stderr,
+            "Browser GL: using default geometry shader winding properties\n");
+    return;
+#endif
+
     const int width = 640;
     const int height = 480;
 

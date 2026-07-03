@@ -559,8 +559,11 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
     r->shader_cache.compare_nodes = shader_cache_entry_compare;
     r->shader_cache.post_node_evict = shader_cache_entry_post_evict;
 
-    qemu_thread_create(&r->shader_disk_thread, "pgraph.renderer_state->shader_cache",
-                       shader_reload_lru_from_disk, pg, QEMU_THREAD_JOINABLE);
+    if (g_config.perf.cache_shaders) {
+        qemu_thread_create(&r->shader_disk_thread,
+                           "pgraph.renderer_state->shader_cache",
+                           shader_reload_lru_from_disk, pg, QEMU_THREAD_JOINABLE);
+    }
 
     /* FIXME: Make this configurable */
     const size_t shader_module_cache_size = 50*1024;

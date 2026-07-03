@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "nv2a.h"
 
 static bool pfifo_boot_trace_enabled(void)
 {
@@ -472,6 +473,9 @@ void *pfifo_thread(void *arg)
     NV2AState *d = (NV2AState *)arg;
 
     pfifo_boot_trace_mark("b2 thread=nv2a-pfifo started");
+#if defined(CONFIG_XEMU_BROWSER_BOOT) && defined(CONFIG_OPENGL)
+    nv2a_context_init();
+#endif
     pgraph_init_thread(d);
 
     rcu_register_thread();

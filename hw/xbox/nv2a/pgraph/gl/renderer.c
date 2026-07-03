@@ -29,6 +29,11 @@ GloContext *g_nv2a_context_display;
 
 static void early_context_init(void)
 {
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    g_nv2a_context_render = glo_context_create();
+    g_nv2a_context_display = g_nv2a_context_render;
+    pgraph_gl_determine_gpu_properties();
+#else
     g_nv2a_context_render = glo_context_create();
     g_nv2a_context_display = glo_context_create();
 
@@ -40,6 +45,7 @@ static void early_context_init(void)
     pgraph_gl_determine_gpu_properties();
     glo_context_destroy(context);
     glo_set_current(g_nv2a_context_display);
+#endif
 }
 
 static void pgraph_gl_init(NV2AState *d, Error **errp)
@@ -61,8 +67,16 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
     /*  Internal RGB565 texture format */
     assert(glo_check_extension("GL_ARB_ES2_compatibility"));
 
-    glGetFloatv(GL_SMOOTH_LINE_WIDTH_RANGE, r->supported_smooth_line_width_range);
+#ifdef XEMU_BROWSER_GL_EXPERIMENT
+    r->supported_aliased_line_width_range[0] = 1.0f;
+    r->supported_aliased_line_width_range[1] = 1.0f;
+    memcpy(r->supported_smooth_line_width_range,
+           r->supported_aliased_line_width_range,
+           sizeof(r->supported_smooth_line_width_range));
+#else
     glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, r->supported_aliased_line_width_range);
+    glGetFloatv(GL_SMOOTH_LINE_WIDTH_RANGE, r->supported_smooth_line_width_range);
+#endif
 
     pgraph_gl_init_surfaces(pg);
     pgraph_gl_init_reports(d);
