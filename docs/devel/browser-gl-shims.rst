@@ -196,10 +196,10 @@ evidence. It supports checks for any display frame and for a visible nonblack
 canvas sample. This is useful for smoke testing the bridge, but it is not a
 correctness test for Xbox rendering.
 
-The harness should eventually grow a comparison mode. A trustworthy test would
-capture a normal desktop xemu frame at the same renderer boundary, capture the
-browser frame at the same boundary, then compare dimensions, hashes, and pixel
-diffs.
+For visual display progress, the harness should capture frame strips for human
+review rather than producing automated image scores. The browser and native
+paths can run at different speeds, and the current work is still exploratory.
+See ``docs/devel/browser-display-visual-review.rst`` for the capture workflow.
 
 How to read the logs
 --------------------

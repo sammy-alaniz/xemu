@@ -8,6 +8,7 @@
 - The current page uses auto assets from `/__xemu_assets__/manifest.json`; do not depend on the old `#requireHddInput` or `/__xemu_smoke_asset/...` controls from the original branch.
 - For this display experiment, interactive mode is the useful default because the GL renderer errors happen after the old smoke path could report `pass`.
 - The browser OpenGL build intentionally sets `-sOFFSCREENCANVASES_TO_PTHREAD= ` with a single-space value. Emscripten treats this as a string and trims it to an empty default at runtime. The display experiment creates a PFIFO-local `OffscreenCanvas`; avoid handing `#canvas` through pthread attrs unless you are deliberately debugging ownership transfer.
+- For boot animation and display-output comparison, do not use automated pixel diffs, hashes, or exact frame-number matching as the decision maker. Capture native and browser frame strips, then judge progress by human visual review: broad sequence, shapes, colors, black gaps, and final screen.
 
 Example:
 

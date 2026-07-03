@@ -1,0 +1,16 @@
+{
+  "kind": "native-llvmpipe-boot-strip",
+  "purpose": "Human visual golden reference for browser display work",
+  "capturedFrames": 70,
+  "fps": 2,
+  "seconds": 35,
+  "resolution": "640x480",
+  "renderer": "llvmpipe software GL",
+  "finalState": "Please insert an Xbox disc...",
+  "review": "human-eyeball-only",
+  "notes": [
+    "Captured from native xemu using scripts/capture-native-boot-strip.sh.",
+    "This is the ideal visual sequence for the current no-disc boot assets.",
+    "Do not use these frames for pixel diffs, hashes, or exact frame-number pass/fail checks."
+  ]
+}

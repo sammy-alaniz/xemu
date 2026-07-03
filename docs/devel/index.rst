@@ -36,3 +36,5 @@ the :ref:`tcg_internals`.
    index-internals
    index-tcg
    codebase
+   browser-gl-shims
+   browser-display-visual-review
