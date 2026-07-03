@@ -377,7 +377,7 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
   globalThis.xemuBrowserBlockClose = moduleArg.xemuBrowserBlockClose;
 }
 
-async function runBoot({ buildDir, timeoutMs, assets }) {
+async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
   const validationError = validateAssets(assets);
   if (validationError) {
     self.postMessage({ type: "done", result: "invalid-assets" });
@@ -389,16 +389,18 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
   const moduleUrl = new URL(`${buildDir.replace(/\/$/, "")}/qemu-system-i386.js`, self.location.href).href;
   const wasmUrl = new URL(`${buildDir.replace(/\/$/, "")}/qemu-system-i386.wasm`, self.location.href).href;
   const { default: Factory } = await import(moduleUrl);
-  const startedAt = Date.now();
   let moduleFS = null;
   let eepromPath = eepromPathForAssets(assets);
+  let timeout = null;
 
-  const timeout = setTimeout(() => {
-    if (moduleFS) {
-      emitEeprom(moduleFS, eepromPath, "timeout");
-    }
-    self.postMessage({ type: "done", result: "timeout" });
-  }, timeoutMs);
+  if (smokeTest) {
+    timeout = setTimeout(() => {
+      if (moduleFS) {
+        emitEeprom(moduleFS, eepromPath, "timeout");
+      }
+      self.postMessage({ type: "done", result: "timeout" });
+    }, timeoutMs);
+  }
 
   const moduleArg = {
     locateFile(path) {
@@ -409,7 +411,7 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
     },
     arguments: [
       "-config_path", "/xemu-fixtures/xemu-smoke.toml",
-      "-headless_boot_ms", String(timeoutMs),
+      "-headless_boot_ms", String(smokeTest ? timeoutMs : 0),
     ],
     print() {
     },

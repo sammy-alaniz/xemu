@@ -70,12 +70,16 @@
 
       <div class="panel display">
         <div class="panel-title">Display</div>
-        <canvas id="displayCanvas" width="256" height="192" aria-label="Synthetic framebuffer preview"></canvas>
+        <canvas id="displayCanvas" width="256" height="192" aria-label="xemu display preview"></canvas>
         <button id="captureDisplayBtn" type="button">Capture</button>
       </div>
 
       <div class="panel controls">
         <div class="panel-title">Run</div>
+        <label class="checkbox">
+          <input id="smokeTestInput" type="checkbox">
+          <span>Stop after timeout</span>
+        </label>
         <label>
           <span>Timeout ms</span>
           <input id="timeoutInput" type="number" min="100" step="100" value="3000">

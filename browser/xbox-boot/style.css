@@ -103,6 +103,11 @@ button:disabled {
   opacity: 0.55;
 }
 
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .status-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }

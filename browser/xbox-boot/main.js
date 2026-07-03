@@ -4,6 +4,7 @@ const refs = {
   syntheticBtn: document.getElementById("syntheticBtn"),
   stopBtn: document.getElementById("stopBtn"),
   downloadBtn: document.getElementById("downloadBtn"),
+  smokeTestInput: document.getElementById("smokeTestInput"),
   timeoutInput: document.getElementById("timeoutInput"),
   buildDirInput: document.getElementById("buildDirInput"),
   logOutput: document.getElementById("logOutput"),
@@ -38,6 +39,9 @@ function loadConfig() {
     if (typeof config.timeoutMs === "number") {
       refs.timeoutInput.value = String(config.timeoutMs);
     }
+    if (typeof config.smokeTest === "boolean") {
+      refs.smokeTestInput.checked = config.smokeTest;
+    }
     if (typeof config.buildDir === "string" && config.buildDir) {
       refs.buildDirInput.value = config.buildDir.includes("build-wasm-pic")
         ? defaultBuildDir
@@ -53,6 +57,7 @@ function currentConfig() {
   return {
     timeoutMs: Math.max(100, Number(refs.timeoutInput.value) || 3000),
     buildDir: refs.buildDirInput.value.trim() || defaultBuildDir,
+    smokeTest: refs.smokeTestInput.checked,
   };
 }
 
@@ -60,7 +65,12 @@ function updateBuildLabel() {
   refs.buildLabel.textContent = `${currentConfig().buildDir}/qemu-system-i386.js`;
 }
 
+function updateRunModeControls() {
+  refs.timeoutInput.disabled = !refs.smokeTestInput.checked;
+}
+
 function saveConfig() {
+  updateRunModeControls();
   localStorage.setItem(configStorageKey, JSON.stringify(currentConfig()));
   updateBuildLabel();
 }
@@ -140,26 +150,6 @@ function appendLog(line) {
   refs.logOutput.textContent += `${text}\n`;
   refs.logOutput.scrollTop = refs.logOutput.scrollHeight;
   refs.downloadBtn.disabled = transcript.length === 0;
-}
-
-function drawSyntheticFramebuffer() {
-  const canvas = refs.displayCanvas;
-  const context = canvas.getContext("2d", { alpha: false });
-  const image = context.createImageData(canvas.width, canvas.height);
-  const data = image.data;
-
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const offset = (y * canvas.width + x) * 4;
-      const checker = ((x >> 4) ^ (y >> 4)) & 1;
-      data[offset] = (x * 5 + y * 3 + (checker ? 79 : 13)) & 0xff;
-      data[offset + 1] = (x * 2 + y * 7 + (checker ? 29 : 101)) & 0xff;
-      data[offset + 2] = (x * 11 + y + (checker ? 151 : 47)) & 0xff;
-      data[offset + 3] = 0xff;
-    }
-  }
-
-  context.putImageData(image, 0, 0);
 }
 
 function clearDisplayCanvas() {
@@ -358,7 +348,7 @@ async function assetToTransfer(asset) {
 }
 
 async function runWithAssets(selectedAssets, runMode) {
-  const { buildDir, timeoutMs } = currentConfig();
+  const { buildDir, timeoutMs, smokeTest } = currentConfig();
   const startedAt = Date.now();
   saveConfig();
   refs.logOutput.textContent = "";
@@ -388,19 +378,24 @@ async function runWithAssets(selectedAssets, runMode) {
     stopWorker(false);
   };
 
-  runTimer = setTimeout(() => {
-    runTimer = null;
-    if (!worker) {
-      return;
-    }
-    stopWorker(false);
-    appendLog(`Run timed out after ${Date.now() - startedAt} ms.`);
-  }, timeoutMs);
+  if (smokeTest) {
+    runTimer = setTimeout(() => {
+      runTimer = null;
+      if (!worker) {
+        return;
+      }
+      stopWorker(false);
+      appendLog(`Run timed out after ${Date.now() - startedAt} ms.`);
+    }, timeoutMs);
+  } else {
+    appendLog("Interactive run started.");
+  }
 
   worker.postMessage({
     type: "start",
     buildDir,
     timeoutMs,
+    smokeTest,
     assets: selectedAssets,
   }, selectedAssets.filter((asset) => asset.buffer).map((asset) => asset.buffer));
 }
@@ -490,6 +485,7 @@ for (const asset of assets) {
   asset.input.addEventListener("change", validateAssets);
 }
 
+refs.smokeTestInput.addEventListener("change", saveConfig);
 refs.timeoutInput.addEventListener("change", saveConfig);
 refs.buildDirInput.addEventListener("change", saveConfig);
 refs.startBtn.addEventListener("click", startRun);
