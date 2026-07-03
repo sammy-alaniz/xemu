@@ -28,27 +28,42 @@
         <div class="panel-title">Assets</div>
         <label class="asset-row">
           <span>Flash</span>
-          <input id="flashInput" type="file" required>
+          <span class="file-control">
+            <input id="flashInput" type="file" required>
+            <span class="file-control-label">Choose file...</span>
+          </span>
           <output id="flashStatus">required</output>
         </label>
         <label class="asset-row">
           <span>MCPX</span>
-          <input id="mcpxInput" type="file">
+          <span class="file-control">
+            <input id="mcpxInput" type="file">
+            <span class="file-control-label">Choose file...</span>
+          </span>
           <output id="mcpxStatus">optional</output>
         </label>
         <label class="asset-row">
           <span>EEPROM</span>
-          <input id="eepromInput" type="file">
+          <span class="file-control">
+            <input id="eepromInput" type="file">
+            <span class="file-control-label">Choose file...</span>
+          </span>
           <output id="eepromStatus">generated</output>
         </label>
         <label class="asset-row">
           <span>HDD</span>
-          <input id="hddInput" type="file">
+          <span class="file-control">
+            <input id="hddInput" type="file">
+            <span class="file-control-label">Choose file...</span>
+          </span>
           <output id="hddStatus">optional</output>
         </label>
         <label class="asset-row">
           <span>DVD</span>
-          <input id="dvdInput" type="file">
+          <span class="file-control">
+            <input id="dvdInput" type="file">
+            <span class="file-control-label">Choose file...</span>
+          </span>
           <output id="dvdStatus">optional</output>
         </label>
       </div>
@@ -68,10 +83,6 @@
         <label>
           <span>Build dir</span>
           <input id="buildDirInput" type="text" value="../../build-wasm">
-        </label>
-        <label class="checkbox">
-          <input id="requireHddInput" type="checkbox">
-          <span>Require B3 asset set</span>
         </label>
       </div>
     </section>

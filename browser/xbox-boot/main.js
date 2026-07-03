@@ -6,7 +6,6 @@ const refs = {
   downloadBtn: document.getElementById("downloadBtn"),
   timeoutInput: document.getElementById("timeoutInput"),
   buildDirInput: document.getElementById("buildDirInput"),
-  requireHddInput: document.getElementById("requireHddInput"),
   logOutput: document.getElementById("logOutput"),
   buildLabel: document.getElementById("buildLabel"),
   displayCanvas: document.getElementById("displayCanvas"),
@@ -24,6 +23,7 @@ const assets = [
 const configStorageKey = "xemu.browserBoot.config.v1";
 const eepromStorageKey = "xemu.browserBoot.eeprom.v1";
 const localAssetManifestUrl = "/__xemu_assets__/manifest.json";
+const defaultBuildDir = "../../build-wasm";
 
 let worker = null;
 let transcript = [];
@@ -39,11 +39,11 @@ function loadConfig() {
       refs.timeoutInput.value = String(config.timeoutMs);
     }
     if (typeof config.buildDir === "string" && config.buildDir) {
-      refs.buildDirInput.value = config.buildDir;
+      refs.buildDirInput.value = config.buildDir.includes("build-wasm-pic")
+        ? defaultBuildDir
+        : config.buildDir;
     }
-    if (typeof config.requireHdd === "boolean") {
-      refs.requireHddInput.checked = config.requireHdd;
-    }
+    saveConfig();
   } catch {
     localStorage.removeItem(configStorageKey);
   }
@@ -52,13 +52,17 @@ function loadConfig() {
 function currentConfig() {
   return {
     timeoutMs: Math.max(100, Number(refs.timeoutInput.value) || 3000),
-    buildDir: refs.buildDirInput.value.trim() || "../../build-wasm",
-    requireHdd: refs.requireHddInput.checked,
+    buildDir: refs.buildDirInput.value.trim() || defaultBuildDir,
   };
+}
+
+function updateBuildLabel() {
+  refs.buildLabel.textContent = `${currentConfig().buildDir}/qemu-system-i386.js`;
 }
 
 function saveConfig() {
   localStorage.setItem(configStorageKey, JSON.stringify(currentConfig()));
+  updateBuildLabel();
 }
 
 function arrayBufferToBase64(buffer) {
@@ -186,6 +190,13 @@ function setAssetStatus(asset, text, state = "") {
   asset.status.className = state;
 }
 
+function setAssetPickerLabel(asset, text, hasAuto = false) {
+  const row = asset.input.closest(".asset-row");
+  const label = row.querySelector(".file-control-label");
+  label.textContent = text;
+  row.classList.toggle("has-auto", hasAuto);
+}
+
 function formatBytes(size) {
   if (size < 1024) {
     return `${size} B`;
@@ -231,15 +242,15 @@ function localAssetFor(key) {
 
 function validateAssets() {
   let ok = true;
-  const requireHdd = refs.requireHddInput.checked;
 
   for (const asset of assets) {
     const file = asset.input.files[0] || null;
     const localAsset = file ? null : localAssetFor(asset.key);
-    const required = asset.required || (requireHdd && asset.key === "hdd");
+    const required = asset.required;
 
     if (!file) {
       if (localAsset) {
+        setAssetPickerLabel(asset, `Using ${localAsset.name || `${asset.key}.bin`}`, true);
         if (asset.exactSize && localAsset.size !== asset.exactSize) {
           setAssetStatus(asset, `auto ${localAsset.size} B`, "bad");
           ok = false;
@@ -248,11 +259,13 @@ function validateAssets() {
         }
         continue;
       }
+      setAssetPickerLabel(asset, "Choose file...");
       setAssetStatus(asset, required ? "required" : asset.key === "eeprom" ? "generated" : "optional", required ? "bad" : "");
       ok = ok && !required;
       continue;
     }
 
+    setAssetPickerLabel(asset, file.name);
     if (asset.exactSize && file.size !== asset.exactSize) {
       setAssetStatus(asset, `${file.size} B`, "bad");
       ok = false;
@@ -330,7 +343,6 @@ async function runWithAssets(selectedAssets, runMode) {
   const { buildDir, timeoutMs } = currentConfig();
   const startedAt = Date.now();
   saveConfig();
-  refs.buildLabel.textContent = `${buildDir}/qemu-system-i386.js`;
   refs.logOutput.textContent = "";
   transcript = [];
 
@@ -458,10 +470,8 @@ for (const asset of assets) {
   asset.input.addEventListener("change", validateAssets);
 }
 
-refs.requireHddInput.addEventListener("change", validateAssets);
 refs.timeoutInput.addEventListener("change", saveConfig);
 refs.buildDirInput.addEventListener("change", saveConfig);
-refs.requireHddInput.addEventListener("change", saveConfig);
 refs.startBtn.addEventListener("click", startRun);
 refs.syntheticBtn.addEventListener("click", startSyntheticRun);
 refs.stopBtn.addEventListener("click", () => stopWorker(true));
