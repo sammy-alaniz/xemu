@@ -402,6 +402,22 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
     }, timeoutMs);
   }
 
+  const moduleArguments = [
+    "-config_path", "/xemu-fixtures/xemu-smoke.toml",
+    "-headless_boot_ms", String(smokeTest ? timeoutMs : 0),
+  ];
+
+  if (!smokeTest) {
+    moduleArguments.push("-no-shutdown");
+  }
+
+  const postLog = (stream, line) => {
+    const text = String(line || "");
+    if (text) {
+      self.postMessage({ type: "log", stream, message: text });
+    }
+  };
+
   const moduleArg = {
     locateFile(path) {
       if (path.endsWith(".wasm")) {
@@ -409,13 +425,15 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
       }
       return new URL(`${buildDir.replace(/\/$/, "")}/${path}`, self.location.href).href;
     },
-    arguments: [
-      "-config_path", "/xemu-fixtures/xemu-smoke.toml",
-      "-headless_boot_ms", String(smokeTest ? timeoutMs : 0),
-    ],
-    print() {
+    arguments: moduleArguments,
+    print(line) {
+      postLog("stdout", line);
     },
-    printErr() {
+    printErr(line) {
+      postLog("stderr", line);
+    },
+    onExit(code) {
+      postLog("xemu", `Exited with code ${code}`);
     },
   };
   moduleArg.xemuBrowserDisplayUpdate = (ptr, width, height, stride) => {
@@ -449,7 +467,10 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
     if (moduleFS) {
       emitEeprom(moduleFS, eepromPath, "module-return");
     }
-    self.postMessage({ type: "done", result: "pass" });
+    self.postMessage({
+      type: "done",
+      result: smokeTest ? "pass" : "module-returned",
+    });
   } catch (error) {
     clearTimeout(timeout);
     if (moduleFS) {

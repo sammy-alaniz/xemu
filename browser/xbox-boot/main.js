@@ -365,6 +365,8 @@ async function runWithAssets(selectedAssets, runMode) {
       savePersistedEeprom(base64);
     } else if (type === "display-frame") {
       drawDisplayFrame(event.data);
+    } else if (type === "log") {
+      appendLog(message || "");
     } else if (type === "error") {
       appendLog(`Error: ${message || "unknown worker error"}`);
     } else if (type === "done") {
