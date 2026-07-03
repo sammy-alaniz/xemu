@@ -392,13 +392,22 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
   let moduleFS = null;
   let eepromPath = eepromPathForAssets(assets);
   let timeout = null;
+  let doneSent = false;
+
+  const finishRun = (result, reason) => {
+    if (doneSent) {
+      return;
+    }
+    doneSent = true;
+    if (moduleFS) {
+      emitEeprom(moduleFS, eepromPath, reason);
+    }
+    self.postMessage({ type: "done", result });
+  };
 
   if (smokeTest) {
     timeout = setTimeout(() => {
-      if (moduleFS) {
-        emitEeprom(moduleFS, eepromPath, "timeout");
-      }
-      self.postMessage({ type: "done", result: "timeout" });
+      finishRun("timeout", "timeout");
     }, timeoutMs);
   }
 
@@ -434,6 +443,9 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
     },
     onExit(code) {
       postLog("xemu", `Exited with code ${code}`);
+      if (!smokeTest) {
+        finishRun(`exited-${code}`, "exit");
+      }
     },
   };
   moduleArg.xemuBrowserDisplayUpdate = (ptr, width, height, stride) => {
@@ -464,20 +476,19 @@ async function runBoot({ buildDir, timeoutMs, smokeTest = true, assets }) {
   try {
     await Factory(moduleArg);
     clearTimeout(timeout);
-    if (moduleFS) {
-      emitEeprom(moduleFS, eepromPath, "module-return");
+    if (smokeTest) {
+      finishRun("pass", "module-return");
+      return;
     }
-    self.postMessage({
-      type: "done",
-      result: smokeTest ? "pass" : "module-returned",
-    });
+
+    if (!doneSent) {
+      postLog("xemu", "Runtime yielded to the browser event loop; interactive worker remains active.");
+    }
+    await new Promise(() => {});
   } catch (error) {
     clearTimeout(timeout);
-    if (moduleFS) {
-      emitEeprom(moduleFS, eepromPath, "error");
-    }
     postError(error && error.stack ? error.stack : error);
-    self.postMessage({ type: "done", result: "fail" });
+    finishRun("fail", "error");
   }
 }
 
