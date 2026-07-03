@@ -1,0 +1,73 @@
+diff --git a/gio/meson.build b/gio/meson.build
+index 6491e91..d2e3748 100644
+--- a/gio/meson.build
++++ b/gio/meson.build
+@@ -49,17 +49,22 @@ if host_system != 'windows'
+                            #include <netinet/in.h>
+                            #include <arpa/nameser.h>
+                         ''' + res_query_test
+-  if not cc.links(res_query_test_full, name : 'res_query()')
++  if cc.links(res_query_test_full, name : 'res_query()')
++    glib_conf.set('HAVE_RES_QUERY', 1)
++  else
+     if cc.links(res_query_test_full, args : '-lresolv', name : 'res_query() in -lresolv')
++      glib_conf.set('HAVE_RES_QUERY', 1)
+       network_libs += [ cc.find_library('resolv') ]
+       network_args += [ '-lresolv' ]
+     elif cc.links(res_query_test, args : '-lbind', name : 'res_query() in -lbind')
++      glib_conf.set('HAVE_RES_QUERY', 1)
+       network_libs += [ cc.find_library('bind') ]
+       network_args += [ '-lbind' ]
+     elif cc.links(res_query_test, args : '-lsocket', name : 'res_query() in -lsocket')
++      glib_conf.set('HAVE_RES_QUERY', 1)
+       network_libs += [ cc.find_library('socket') ]
+       network_args += [ '-lsocket' ]
+-    else
++    elif host_system != 'emscripten'
+       error('Could not find res_query()')
+     endif
+   endif
+diff --git a/gio/gthreadedresolver.c b/gio/gthreadedresolver.c
+index ef9ee7c..762bf46 100644
+--- a/gio/gthreadedresolver.c
++++ b/gio/gthreadedresolver.c
+@@ -580,7 +580,7 @@ do_lookup_by_name (GTask         *task,
+ }
+ 
+ 
+-#if defined(G_OS_UNIX)
++#if defined(G_OS_UNIX) && (defined(HAVE_RES_NQUERY) || defined(HAVE_RES_QUERY))
+ 
+ #if defined __BIONIC__ && !defined BIND_4_COMPAT
+ /* Copy from bionic/libc/private/arpa_nameser_compat.h
+@@ -1310,7 +1310,7 @@ do_lookup_records (const gchar          *rrname,
+       g_byte_array_set_size (answer, len * 2);
+ #if defined(HAVE_RES_NQUERY)
+       len = res_nquery (&res, rrname, C_IN, rrtype, answer->data, answer->len);
+-#else
++#elif defined(HAVE_RES_QUERY)
+       len = res_query (rrname, C_IN, rrtype, answer->data, answer->len);
+ #endif
+ 
+@@ -1340,7 +1340,7 @@ do_lookup_records (const gchar          *rrname,
+ 
+ #endif  /* HAVE_RES_NQUERY */
+ 
+-#else
++#elif defined(G_OS_WIN32)
+ 
+   DNS_STATUS status;
+   DNS_RECORDA *results = NULL;
+@@ -1359,6 +1359,12 @@ do_lookup_records (const gchar          *rrname,
+   if (results != NULL)
+     DnsRecordListFree (results, DnsFreeRecordList);
+ 
++#else
++
++  g_set_error (error, G_RESOLVER_ERROR, G_RESOLVER_ERROR_NOT_FOUND,
++               _("No DNS record of the requested type for “%s”"), rrname);
++  records = NULL;
++
+ #endif
+ 
+   return g_steal_pointer (&records);

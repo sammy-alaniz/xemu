@@ -24,6 +24,8 @@ GTAGS
 *.depend_raw
 *.swp
 *.patch
+!/patches/
+!/patches/*.patch
 *.gcov
 
 build.log

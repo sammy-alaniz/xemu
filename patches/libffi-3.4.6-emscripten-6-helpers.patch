@@ -1,0 +1,53 @@
+diff --git a/src/wasm32/ffi.c b/src/wasm32/ffi.c
+index 6d6310c..08bdb16 100644
+--- a/src/wasm32/ffi.c
++++ b/src/wasm32/ffi.c
+@@ -49,7 +49,7 @@ EM_JS_DEPS(libffi, "$getWasmTableEntry,$setWasmTableEntry,$getEmptyTableSlot,$co
+ 
+ #define JS_FUNCTION_TO_WASM convertJsFunctionToWasm
+ #else
+-EM_JS_DEPS(libffi, "$getWasmTableEntry,$setWasmTableEntry,$getEmptyTableSlot,$convertJsFunctionToWasm,$dynCall,$generateFuncType,$uleb128Encode");
++EM_JS_DEPS(libffi, "$getWasmTableEntry,$setWasmTableEntry,$getEmptyTableSlot,$convertJsFunctionToWasm,$dynCall");
+ #define CALL_FUNCTION_POINTER(ptr, args...)     \
+   (LOG_DEBUG("CALL_FUNC_PTR", sig, ptr, args),  \
+   dynCall(sig, ptr, args))
+@@ -540,6 +540,39 @@ EM_JS(void, createLegalizerWrapper, (int trampoline, int sig), {
+   if(!sig.includes("j")) {
+     return convertJsFunctionToWasm(trampoline, sig);
+   }
++
++  function uleb128Encode(n, target) {
++    do {
++      var byte = n & 0x7f;
++      n >>>= 7;
++      if (n) {
++        byte |= 0x80;
++      }
++      target.push(byte);
++    } while (n);
++  }
++
++  var wasmTypeCodes = {
++    i: 0x7f,
++    p: 0x7f,
++    j: 0x7e,
++    f: 0x7d,
++    d: 0x7c,
++  };
++
++  function generateTypePack(types, target) {
++    uleb128Encode(types.length, target);
++    for (var i = 0; i < types.length; i++) {
++      target.push(wasmTypeCodes[types[i]]);
++    }
++  }
++
++  function generateFuncType(sig, target) {
++    target.push(0x60);
++    generateTypePack(sig.slice(1), target);
++    generateTypePack(sig[0] === "v" ? "" : sig[0], target);
++  }
++
+   var sections = [];
+   var prelude = [
+     0x00, 0x61, 0x73, 0x6d, // magic ("\0asm")

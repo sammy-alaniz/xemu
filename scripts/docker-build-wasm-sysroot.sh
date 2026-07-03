@@ -3,12 +3,34 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+docker_cmd="${XEMU_DOCKER:-docker}"
 image="${XEMU_WASM_DOCKER_IMAGE:-xemu-wasm-build:latest}"
 skip_image_build="${XEMU_WASM_SKIP_IMAGE_BUILD:-0}"
 sysroot_dir="${XEMU_WASM_SYSROOT_DIR:-build-wasm-sysroot}"
+zlib_sha256="${XEMU_ZLIB_SHA256:-9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23}"
+pcre2_sha256="${XEMU_PCRE2_SHA256:-889d16be5abb8d05400b33c25e151638b8d4bac0e2d9c76e9d6923118ae8a34e}"
+libffi_sha256="${XEMU_LIBFFI_SHA256:-b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e}"
+glib_sha256="${XEMU_GLIB_SHA256:-8228a92f92a412160b139ae68b6345bd28f24434a7b5af150ebe21ff587a561d}"
+
+required_patches=(
+    "${repo_root}/patches/libffi-3.4.6-emscripten-6-helpers.patch"
+    "${repo_root}/patches/glib-2.80.0-emscripten-no-res-query.patch"
+    "${repo_root}/patches/glib-2.80.0-emscripten-no-posix-spawn.patch"
+)
+
+missing_patch=0
+for patch_file in "${required_patches[@]}"; do
+    if [ ! -f "${patch_file}" ]; then
+        echo "Missing required WASM sysroot patch: ${patch_file}" >&2
+        missing_patch=1
+    fi
+done
+if [ "${missing_patch}" != "0" ]; then
+    exit 1
+fi
 
 if [ "${skip_image_build}" != "1" ]; then
-    docker build \
+    "${docker_cmd}" build \
         -f "${repo_root}/docker/xemu-wasm-build.Dockerfile" \
         -t "${image}" \
         "${repo_root}/docker"
@@ -16,7 +38,7 @@ fi
 
 mkdir -p "${repo_root}/${sysroot_dir}"
 
-docker run --rm -t \
+"${docker_cmd}" run --rm -t \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp/xemu-home \
     -e XEMU_GLIB_VERSION="${XEMU_GLIB_VERSION:-2.80.0}" \
@@ -24,6 +46,10 @@ docker run --rm -t \
     -e XEMU_LIBFFI_VERSION="${XEMU_LIBFFI_VERSION:-3.4.6}" \
     -e XEMU_PCRE2_VERSION="${XEMU_PCRE2_VERSION:-10.43}" \
     -e XEMU_ZLIB_VERSION="${XEMU_ZLIB_VERSION:-1.3.1}" \
+    -e XEMU_GLIB_SHA256="${glib_sha256}" \
+    -e XEMU_LIBFFI_SHA256="${libffi_sha256}" \
+    -e XEMU_PCRE2_SHA256="${pcre2_sha256}" \
+    -e XEMU_ZLIB_SHA256="${zlib_sha256}" \
     -v "${repo_root}:/workspace" \
     -w "/workspace/${sysroot_dir}" \
     "${image}" \
@@ -39,6 +65,14 @@ docker run --rm -t \
         export CXXFLAGS="${CXXFLAGS:-} -pthread"
         export LDFLAGS="${LDFLAGS:-} -pthread"
 
+        verify_archive() {
+            archive="$1"
+            expected="$2"
+            if [ -n "${expected}" ]; then
+                printf "%s  src/%s\n" "${expected}" "${archive}" | sha256sum -c -
+            fi
+        }
+
         python3 -m venv --system-site-packages pyvenv
         pyvenv/bin/pip install --no-index --find-links=/workspace/python/wheels meson==1.9.0 >/dev/null
         meson_bin="${PWD}/pyvenv/bin/meson"
@@ -47,6 +81,7 @@ docker run --rm -t \
         if [ ! -f "src/${zlib_archive}" ]; then
             curl -fL "https://zlib.net/fossils/${zlib_archive}" -o "src/${zlib_archive}"
         fi
+        verify_archive "${zlib_archive}" "${XEMU_ZLIB_SHA256}"
         if [ ! -d "src/zlib-${XEMU_ZLIB_VERSION}" ]; then
             tar -xf "src/${zlib_archive}" -C src
         fi
@@ -68,6 +103,7 @@ docker run --rm -t \
             curl -fL "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${XEMU_PCRE2_VERSION}/${pcre2_archive}" \
                 -o "src/${pcre2_archive}"
         fi
+        verify_archive "${pcre2_archive}" "${XEMU_PCRE2_SHA256}"
         if [ ! -d "src/pcre2-${XEMU_PCRE2_VERSION}" ]; then
             tar -xf "src/${pcre2_archive}" -C src
         fi
@@ -92,6 +128,7 @@ docker run --rm -t \
             curl -fL "https://github.com/libffi/libffi/releases/download/v${XEMU_LIBFFI_VERSION}/${libffi_archive}" \
                 -o "src/${libffi_archive}"
         fi
+        verify_archive "${libffi_archive}" "${XEMU_LIBFFI_SHA256}"
         if [ ! -d "src/libffi-${XEMU_LIBFFI_VERSION}" ]; then
             tar -xf "src/${libffi_archive}" -C src
         fi
@@ -129,6 +166,7 @@ docker run --rm -t \
             curl -fL "https://download.gnome.org/sources/glib/${glib_minor}/${glib_archive}" \
                 -o "src/${glib_archive}"
         fi
+        verify_archive "${glib_archive}" "${XEMU_GLIB_SHA256}"
         if [ ! -d "src/glib-${XEMU_GLIB_VERSION}" ]; then
             tar -xf "src/${glib_archive}" -C src
         fi

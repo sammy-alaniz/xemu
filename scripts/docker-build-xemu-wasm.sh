@@ -3,6 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+docker_cmd="${XEMU_DOCKER:-docker}"
 image="${XEMU_WASM_DOCKER_IMAGE:-xemu-wasm-build:latest}"
 build_dir="${XEMU_WASM_BUILD_DIR:-build-wasm}"
 sysroot_dir="${XEMU_WASM_SYSROOT_DIR:-build-wasm-sysroot}"
@@ -22,7 +23,7 @@ detect_jobs() {
 jobs="${XEMU_WASM_JOBS:-$(detect_jobs)}"
 
 if [ "${skip_image_build}" != "1" ]; then
-    docker build \
+    "${docker_cmd}" build \
         -f "${repo_root}/docker/xemu-wasm-build.Dockerfile" \
         -t "${image}" \
         "${repo_root}/docker"
@@ -30,7 +31,7 @@ fi
 
 mkdir -p "${repo_root}/${build_dir}"
 
-docker run --rm -t \
+"${docker_cmd}" run --rm -t \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp/xemu-home \
     -e JOBS="${jobs}" \
