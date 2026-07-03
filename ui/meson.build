@@ -21,6 +21,7 @@ xemu_ss = ss.source_set()
 if get_option('xemu_browser_boot')
   xemu_ss.add(files(
     'xemu-headless.c',
+    'xemu-browser-display.c',
     'xemu-input-stubs.c',
     'xemu-net-stubs.c',
     'xemu-notifications-stubs.c',

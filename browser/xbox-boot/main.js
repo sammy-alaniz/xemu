@@ -162,6 +162,24 @@ function drawSyntheticFramebuffer() {
   context.putImageData(image, 0, 0);
 }
 
+function clearDisplayCanvas() {
+  const canvas = refs.displayCanvas;
+  const context = canvas.getContext("2d", { alpha: false });
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawDisplayFrame({ width, height, pixels }) {
+  const canvas = refs.displayCanvas;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const context = canvas.getContext("2d", { alpha: false });
+  const image = new ImageData(new Uint8ClampedArray(pixels), width, height);
+  context.putImageData(image, 0, 0);
+}
+
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -355,6 +373,8 @@ async function runWithAssets(selectedAssets, runMode) {
     const { type, result, base64, message } = event.data || {};
     if (type === "eeprom") {
       savePersistedEeprom(base64);
+    } else if (type === "display-frame") {
+      drawDisplayFrame(event.data);
     } else if (type === "error") {
       appendLog(`Error: ${message || "unknown worker error"}`);
     } else if (type === "done") {
@@ -484,7 +504,7 @@ refs.captureDisplayBtn.addEventListener("click", () => {
 
 loadConfig();
 renderCapabilities();
-drawSyntheticFramebuffer();
+clearDisplayCanvas();
 globalThis.xemuBrowserDisplayCapture = captureSyntheticDisplayEvidence;
 validateAssets();
 loadLocalAssetManifest();

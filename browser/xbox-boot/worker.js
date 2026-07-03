@@ -416,6 +416,23 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
     printErr() {
     },
   };
+  moduleArg.xemuBrowserDisplayUpdate = (ptr, width, height, stride) => {
+    const heap = moduleArg.HEAPU8;
+    const pixels = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y++) {
+      const start = ptr + y * stride;
+      const end = start + width * 4;
+      pixels.set(heap.subarray(start, end), y * width * 4);
+    }
+
+    self.postMessage({
+      type: "display-frame",
+      width,
+      height,
+      pixels: pixels.buffer,
+    }, [pixels.buffer]);
+  };
   installBrowserBlockCallbacks(moduleArg, browserBlocks);
 
   moduleArg.preRun = [() => {

@@ -11,6 +11,7 @@
 #include "system/runstate.h"
 #include "system/runstate-action.h"
 #include "system/system.h"
+#include "ui/xemu-browser-display.h"
 #include "ui/xemu-settings.h"
 
 #include <locale.h>
@@ -66,6 +67,7 @@ static void *qemu_main_thread(void *opaque)
 {
     xemu_boot_trace_mark("b0 thread=qemu-main started");
     qemu_init(g_argc, g_argv);
+    xemu_browser_display_init();
     exit_status = qemu_main_loop();
     qatomic_set(&qemu_exiting, true);
     bql_unlock();
