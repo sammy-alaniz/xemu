@@ -1,6 +1,4 @@
 import {
-  BlobBlockDevice,
-  MemoryBlockDevice,
   SyncMemoryBlockDevice,
   chunksFromOverlaySnapshot,
 } from "./block-storage.mjs";
@@ -17,13 +15,8 @@ const browserBlockKeys = new Set(["hdd", "dvd"]);
 const blockSnapshotDbName = "xemu.browserBoot.blockSnapshots.v1";
 const blockSnapshotStoreName = "snapshots";
 
-function postLog(line) {
-  self.postMessage({ type: "log", line });
-}
-
-async function sha256Hex(bytes) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+function postError(message) {
+  self.postMessage({ type: "error", message: String(message) });
 }
 
 function bytesToBase64(bytes) {
@@ -68,19 +61,11 @@ enable = false
 `;
 }
 
-async function blockDeviceForAsset(asset) {
-  if (asset.blob) {
-    return new BlobBlockDevice(asset.blob, { name: asset.name || asset.key });
-  }
-  return new MemoryBlockDevice(new Uint8Array(asset.buffer), { name: asset.name || asset.key });
-}
-
 async function materializeAssetBytes(asset) {
   if (asset.buffer) {
     return new Uint8Array(asset.buffer);
   }
   if (asset.blob) {
-    postLog(`BROWSER_BLOCK_MATERIALIZE asset=${asset.key} bytes=${asset.size} mode=temporary-memfs-bridge`);
     return new Uint8Array(await asset.blob.arrayBuffer());
   }
   throw new Error(`asset has no readable storage: ${asset.key}`);
@@ -123,7 +108,6 @@ async function prepareOpfsBlock(asset) {
 
   const accessHandle = await fileHandle.createSyncAccessHandle();
   const copied = await copyBlobToAccessHandle(asset, accessHandle);
-  postLog(`BROWSER_BLOCK_BACKING result=pass asset=${asset.key} backend=opfs-sync bytes=${copied}`);
   return {
     key: asset.key,
     name: asset.name,
@@ -164,11 +148,9 @@ async function loadBlockSnapshot(asset, bytes) {
     db.close();
 
     if (!record || !record.snapshot) {
-      postLog(`BROWSER_BLOCK_SNAPSHOT_LOAD result=skip asset=${asset.key} source=indexedDB reason=missing`);
       return 0;
     }
     if (record.size !== bytes.byteLength) {
-      postLog(`BROWSER_BLOCK_SNAPSHOT_LOAD result=skip asset=${asset.key} source=indexedDB reason=size-mismatch expected=${bytes.byteLength} actual=${record.size}`);
       return 0;
     }
 
@@ -176,18 +158,15 @@ async function loadBlockSnapshot(asset, bytes) {
     for (const [start, chunkBytes] of chunks) {
       bytes.set(chunkBytes, start);
     }
-    postLog(`BROWSER_BLOCK_SNAPSHOT_LOAD result=pass asset=${asset.key} source=indexedDB chunks=${chunks.length} serialized_bytes=${record.serializedBytes || "unknown"}`);
     return chunks.length;
   } catch (error) {
-    postLog(`BROWSER_BLOCK_SNAPSHOT_LOAD result=skip asset=${asset.key} source=indexedDB reason=${JSON.stringify(error.message || String(error))}`);
     return 0;
   }
 }
 
 async function prepareMemoryBlock(asset) {
   const bytes = await materializeAssetBytes(asset);
-  const restoredChunks = await loadBlockSnapshot(asset, bytes);
-  postLog(`BROWSER_BLOCK_BACKING result=pass asset=${asset.key} backend=memory bytes=${bytes.byteLength} restored_chunks=${restoredChunks}`);
+  await loadBlockSnapshot(asset, bytes);
   return {
     key: asset.key,
     name: asset.name,
@@ -216,50 +195,7 @@ async function persistBlockSnapshot(block, snapshot, serializedBytes) {
       tx.onabort = () => reject(tx.error || new Error("indexedDB transaction aborted"));
     });
     db.close();
-    postLog(`BROWSER_BLOCK_SNAPSHOT_PERSIST result=pass asset=${block.key} target=indexedDB serialized_bytes=${serializedBytes}`);
   } catch (error) {
-    postLog(`BROWSER_BLOCK_SNAPSHOT_PERSIST result=skip asset=${block.key} target=indexedDB reason=${JSON.stringify(error.message || String(error))}`);
-  }
-}
-
-async function probeBlockAsset(asset) {
-  if (asset.key !== "hdd" && asset.key !== "dvd") {
-    return;
-  }
-  const device = await blockDeviceForAsset(asset);
-  const sectorCount = Math.floor(device.size / device.sectorSize);
-  if (sectorCount === 0) {
-    postLog(`BROWSER_BLOCK_PROBE result=skip asset=${asset.key} reason=too-small size=${device.size}`);
-    return;
-  }
-
-  const lbas = Array.from(new Set([
-    0,
-    Math.floor(sectorCount / 2),
-    sectorCount - 1,
-  ]));
-  const hashes = [];
-  for (const lba of lbas) {
-    const bytes = await device.readSectors(lba, 1);
-    hashes.push(`${lba}:${(await sha256Hex(bytes)).slice(0, 16)}`);
-  }
-
-  postLog([
-    "BROWSER_BLOCK_PROBE",
-    "result=pass",
-    `asset=${asset.key}`,
-    `source=${asset.blob ? "blob" : "buffer"}`,
-    `size=${device.size}`,
-    `sector_size=${device.sectorSize}`,
-    `sector_reads=${lbas.length}`,
-    `bytes_read=${device.stats.bytesRead}`,
-    `hashes=${hashes.join(",")}`,
-  ].join(" "));
-}
-
-async function probeBlockAssets(assets) {
-  for (const asset of assets) {
-    await probeBlockAsset(asset);
   }
 }
 
@@ -301,12 +237,8 @@ function emitEeprom(FS, path, reason) {
     const bytes = FS.readFile(path);
     if (bytes.length === 256) {
       self.postMessage({ type: "eeprom", base64: bytesToBase64(bytes), reason });
-      postLog(`BROWSER_EEPROM_EXPORT result=pass reason=${reason} bytes=256 path=${path}`);
-    } else {
-      postLog(`BROWSER_EEPROM_EXPORT result=skip reason=bad-size size=${bytes.length} path=${path}`);
     }
   } catch (error) {
-    postLog(`BROWSER_EEPROM_EXPORT result=skip reason=read-failed message=${JSON.stringify(error.message || String(error))}`);
   }
 }
 
@@ -354,7 +286,6 @@ async function prepareBrowserBlocks(assets) {
     try {
       block = await prepareOpfsBlock(asset);
     } catch (error) {
-      postLog(`BROWSER_BLOCK_BACKING result=fail asset=${asset.key} backend=opfs-sync message=${JSON.stringify(error.message || String(error))}`);
     }
     if (!block) {
       block = await prepareMemoryBlock(asset);
@@ -370,12 +301,10 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
   moduleArg.xemuBrowserBlockOpen = (path, writable) => {
     const block = registry.byPath.get(path);
     if (!block) {
-      postLog(`BROWSER_BLOCK_OPEN result=fail path=${JSON.stringify(path)}`);
       return -1;
     }
     const id = registry.nextId++;
     registry.byId.set(id, block);
-    postLog(`BROWSER_BLOCK_OPEN result=pass id=${id} asset=${block.key} backend=${block.backend} writable=${writable ? "yes" : "no"} size=${block.size}`);
     return id;
   };
 
@@ -388,19 +317,16 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
     const block = registry.byId.get(id);
     offset = Number(offset);
     if (!block || offset < 0 || bytes < 0 || offset + bytes > block.size) {
-      postLog(`BROWSER_BLOCK_READ result=fail id=${id} offset=${offset} bytes=${bytes}`);
       return -1;
     }
     if (block.accessHandle) {
       const actual = block.accessHandle.read(heap().subarray(ptr, ptr + bytes), { at: offset });
       if (actual !== bytes) {
-        postLog(`BROWSER_BLOCK_READ result=fail id=${id} offset=${offset} bytes=${bytes} actual=${actual}`);
         return -1;
       }
     } else {
       block.device.readInto(heap().subarray(ptr, ptr + bytes), offset);
     }
-    postLog(`BROWSER_BLOCK_READ result=pass id=${id} asset=${block.key} backend=${block.backend} offset=${offset} bytes=${bytes}`);
     return 0;
   };
 
@@ -408,19 +334,16 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
     const block = registry.byId.get(id);
     offset = Number(offset);
     if (!block || offset < 0 || bytes < 0 || offset + bytes > block.size) {
-      postLog(`BROWSER_BLOCK_WRITE result=fail id=${id} offset=${offset} bytes=${bytes}`);
       return -1;
     }
     if (block.accessHandle) {
       const actual = block.accessHandle.write(heap().subarray(ptr, ptr + bytes), { at: offset });
       if (actual !== bytes) {
-        postLog(`BROWSER_BLOCK_WRITE result=fail id=${id} offset=${offset} bytes=${bytes} actual=${actual}`);
         return -1;
       }
     } else {
       block.device.writeFrom(heap().subarray(ptr, ptr + bytes), offset);
     }
-    postLog(`BROWSER_BLOCK_WRITE result=pass id=${id} asset=${block.key} backend=${block.backend} offset=${offset} bytes=${bytes}`);
     return 0;
   };
 
@@ -432,13 +355,9 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
       const snapshot = block.device.flushSnapshot();
       if (snapshot) {
         const serialized = JSON.stringify(snapshot);
-        postLog(`BROWSER_BLOCK_SNAPSHOT result=pass id=${id} asset=${block.key} backend=${block.backend} chunks=${snapshot.chunks.length} serialized_bytes=${serialized.length}`);
         void persistBlockSnapshot(block, snapshot, serialized.length);
-      } else {
-        postLog(`BROWSER_BLOCK_SNAPSHOT result=skip id=${id} asset=${block.key} backend=${block.backend} reason=no-dirty-chunks`);
       }
     }
-    postLog(`BROWSER_BLOCK_FLUSH result=${block ? "pass" : "fail"} id=${id}`);
     return block ? 0 : -1;
   };
 
@@ -448,7 +367,6 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
       block.accessHandle.close();
     }
     registry.byId.delete(id);
-    postLog(`BROWSER_BLOCK_CLOSE result=${block ? "pass" : "skip"} id=${id}`);
   };
 
   globalThis.xemuBrowserBlockOpen = moduleArg.xemuBrowserBlockOpen;
@@ -462,12 +380,9 @@ function installBrowserBlockCallbacks(moduleArg, registry) {
 async function runBoot({ buildDir, timeoutMs, assets }) {
   const validationError = validateAssets(assets);
   if (validationError) {
-    postLog(`BROWSER_ASSET_VALIDATE result=fail reason=${validationError}`);
     self.postMessage({ type: "done", result: "invalid-assets" });
     return;
   }
-  postLog(`BROWSER_ASSET_VALIDATE result=pass count=${assets.length}`);
-  await probeBlockAssets(assets);
   const browserBlocks = await prepareBrowserBlocks(assets);
   const materializedAssets = await materializeAssets(assets);
 
@@ -482,7 +397,6 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
     if (moduleFS) {
       emitEeprom(moduleFS, eepromPath, "timeout");
     }
-    postLog(`BOOT_SMOKE_RESULT reason=browser-host-timeout elapsed_ms=${Date.now() - startedAt} exit=124`);
     self.postMessage({ type: "done", result: "timeout" });
   }, timeoutMs);
 
@@ -497,8 +411,10 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
       "-config_path", "/xemu-fixtures/xemu-smoke.toml",
       "-headless_boot_ms", String(timeoutMs),
     ],
-    print: postLog,
-    printErr: postLog,
+    print() {
+    },
+    printErr() {
+    },
   };
   installBrowserBlockCallbacks(moduleArg, browserBlocks);
 
@@ -514,14 +430,13 @@ async function runBoot({ buildDir, timeoutMs, assets }) {
     if (moduleFS) {
       emitEeprom(moduleFS, eepromPath, "module-return");
     }
-    postLog(`BOOT_SMOKE_RESULT reason=browser-module-return elapsed_ms=${Date.now() - startedAt} exit=0`);
     self.postMessage({ type: "done", result: "pass" });
   } catch (error) {
     clearTimeout(timeout);
     if (moduleFS) {
       emitEeprom(moduleFS, eepromPath, "error");
     }
-    postLog(`BROWSER_BOOT_ERROR ${error && error.stack ? error.stack : error}`);
+    postError(error && error.stack ? error.stack : error);
     self.postMessage({ type: "done", result: "fail" });
   }
 }
@@ -531,7 +446,7 @@ self.onmessage = (event) => {
     return;
   }
   runBoot(event.data).catch((error) => {
-    postLog(`BROWSER_BOOT_ERROR ${error && error.stack ? error.stack : error}`);
+    postError(error && error.stack ? error.stack : error);
     self.postMessage({ type: "done", result: "fail" });
   });
 };

@@ -23,11 +23,14 @@ const assets = [
 
 const configStorageKey = "xemu.browserBoot.config.v1";
 const eepromStorageKey = "xemu.browserBoot.eeprom.v1";
+const localAssetManifestUrl = "/__xemu_assets__/manifest.json";
 
 let worker = null;
 let transcript = [];
 let lastObjectUrl = null;
 let runTimer = null;
+let localAssets = new Map();
+let localAssetManifestPromise = null;
 
 function loadConfig() {
   try {
@@ -49,7 +52,7 @@ function loadConfig() {
 function currentConfig() {
   return {
     timeoutMs: Math.max(100, Number(refs.timeoutInput.value) || 3000),
-    buildDir: refs.buildDirInput.value.trim() || "../../build-wasm-pic",
+    buildDir: refs.buildDirInput.value.trim() || "../../build-wasm",
     requireHdd: refs.requireHddInput.checked,
   };
 }
@@ -84,10 +87,8 @@ function loadPersistedEepromAsset() {
   const buffer = base64ToArrayBuffer(base64);
   if (buffer.byteLength !== 256) {
     localStorage.removeItem(eepromStorageKey);
-    appendLog(`BROWSER_EEPROM_PERSIST result=discarded reason=bad-size size=${buffer.byteLength}`);
     return null;
   }
-  appendLog("BROWSER_EEPROM_PERSIST result=loaded bytes=256 source=localStorage");
   return {
     key: "eeprom",
     name: "persisted-eeprom.bin",
@@ -100,11 +101,9 @@ function loadPersistedEepromAsset() {
 function savePersistedEeprom(base64) {
   const buffer = base64ToArrayBuffer(base64);
   if (buffer.byteLength !== 256) {
-    appendLog(`BROWSER_EEPROM_PERSIST result=skip reason=bad-size size=${buffer.byteLength}`);
     return;
   }
   localStorage.setItem(eepromStorageKey, arrayBufferToBase64(buffer));
-  appendLog("BROWSER_EEPROM_PERSIST result=saved bytes=256 target=localStorage");
 }
 
 function capabilityRows() {
@@ -178,58 +177,8 @@ async function captureSyntheticDisplayEvidence({ log = true } = {}) {
   }
 
   const hash = await sha256Hex(image.data);
-  const marker = "BOOT_MARK b4 display=visible source=synthetic-framebuffer";
-  const capture = [
-    "BROWSER_DISPLAY_CAPTURE",
-    `result=${nonempty ? "pass" : "fail"}`,
-    `nonempty=${nonempty ? "yes" : "no"}`,
-    `hash=${hash}`,
-    "source=synthetic-framebuffer",
-    `width=${canvas.width}`,
-    `height=${canvas.height}`,
-  ].join(" ");
 
-  if (log) {
-    appendLog(marker);
-    appendLog(capture);
-  }
-
-  return { marker, capture, hash, nonempty, width: canvas.width, height: canvas.height };
-}
-
-function logBrowserMetadata(buildDir, timeoutMs) {
-  appendLog(`BROWSER_BOOT_START timeout_ms=${timeoutMs} build_dir=${buildDir}`);
-  appendLog(`BROWSER_CONFIG persisted=yes require_hdd=${refs.requireHddInput.checked ? "yes" : "no"}`);
-  appendLog(`BROWSER_USER_AGENT value=${JSON.stringify(navigator.userAgent)}`);
-  appendLog(`BROWSER_LOCATION href=${JSON.stringify(location.href)}`);
-  for (const [name, ok] of capabilityRows()) {
-    appendLog(`BROWSER_CAPABILITY name=${name} available=${ok ? "yes" : "no"}`);
-  }
-}
-
-async function logArtifactMetadata(buildDir) {
-  const base = buildDir.replace(/\/$/, "");
-  const artifacts = [
-    ["js", `${base}/qemu-system-i386.js`],
-    ["wasm", `${base}/qemu-system-i386.wasm`],
-  ];
-
-  for (const [kind, artifactPath] of artifacts) {
-    const url = new URL(artifactPath, location.href).href;
-    try {
-      const response = await fetch(url, { method: "HEAD", cache: "no-store" });
-      appendLog([
-        "BROWSER_ARTIFACT",
-        `kind=${kind}`,
-        `url=${JSON.stringify(url)}`,
-        `status=${response.status}`,
-        `bytes=${response.headers.get("content-length") || "unknown"}`,
-        `type=${JSON.stringify(response.headers.get("content-type") || "")}`,
-      ].join(" "));
-    } catch (error) {
-      appendLog(`BROWSER_ARTIFACT kind=${kind} url=${JSON.stringify(url)} status=error message=${JSON.stringify(error.message)}`);
-    }
-  }
+  return { hash, nonempty, width: canvas.width, height: canvas.height };
 }
 
 function setAssetStatus(asset, text, state = "") {
@@ -247,15 +196,58 @@ function formatBytes(size) {
   return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+async function loadLocalAssetManifest() {
+  if (localAssetManifestPromise) {
+    return localAssetManifestPromise;
+  }
+
+  localAssetManifestPromise = fetch(localAssetManifestUrl, { cache: "no-store" })
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`manifest status ${response.status}`);
+      }
+      const manifest = await response.json();
+      localAssets = new Map();
+      for (const asset of manifest.assets || []) {
+        if (asset && asset.key && asset.available && asset.url) {
+          localAssets.set(asset.key, asset);
+        }
+      }
+      validateAssets();
+      return localAssets;
+    })
+    .catch((error) => {
+      localAssets = new Map();
+      validateAssets();
+      return localAssets;
+    });
+
+  return localAssetManifestPromise;
+}
+
+function localAssetFor(key) {
+  return localAssets.get(key) || null;
+}
+
 function validateAssets() {
   let ok = true;
   const requireHdd = refs.requireHddInput.checked;
 
   for (const asset of assets) {
     const file = asset.input.files[0] || null;
+    const localAsset = file ? null : localAssetFor(asset.key);
     const required = asset.required || (requireHdd && asset.key === "hdd");
 
     if (!file) {
+      if (localAsset) {
+        if (asset.exactSize && localAsset.size !== asset.exactSize) {
+          setAssetStatus(asset, `auto ${localAsset.size} B`, "bad");
+          ok = false;
+        } else {
+          setAssetStatus(asset, `auto ${formatBytes(localAsset.size)}`, "ok");
+        }
+        continue;
+      }
       setAssetStatus(asset, required ? "required" : asset.key === "eeprom" ? "generated" : "optional", required ? "bad" : "");
       ok = ok && !required;
       continue;
@@ -285,6 +277,7 @@ async function fileToTransfer(asset) {
       key: asset.key,
       name: file.name,
       size: file.size,
+      source: "file-picker",
       blob: file,
     };
   }
@@ -292,8 +285,45 @@ async function fileToTransfer(asset) {
     key: asset.key,
     name: file.name,
     size: file.size,
+    source: "file-picker",
     buffer: await file.arrayBuffer(),
   };
+}
+
+async function localAssetToTransfer(asset) {
+  const localAsset = localAssetFor(asset.key);
+  if (!localAsset) {
+    return null;
+  }
+
+  const response = await fetch(localAsset.url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`local asset ${asset.key} status ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const selected = {
+    key: asset.key,
+    name: localAsset.name || `${asset.key}.bin`,
+    size: localAsset.size || blob.size,
+    source: "local-server",
+  };
+
+  if (asset.key === "hdd" || asset.key === "dvd") {
+    return {
+      ...selected,
+      blob,
+    };
+  }
+
+  return {
+    ...selected,
+    buffer: await blob.arrayBuffer(),
+  };
+}
+
+async function assetToTransfer(asset) {
+  return (await fileToTransfer(asset)) || (await localAssetToTransfer(asset));
 }
 
 async function runWithAssets(selectedAssets, runMode) {
@@ -303,13 +333,6 @@ async function runWithAssets(selectedAssets, runMode) {
   refs.buildLabel.textContent = `${buildDir}/qemu-system-i386.js`;
   refs.logOutput.textContent = "";
   transcript = [];
-  logBrowserMetadata(buildDir, timeoutMs);
-  appendLog(`BROWSER_RUN_MODE mode=${runMode}`);
-  await logArtifactMetadata(buildDir);
-
-  for (const selected of selectedAssets) {
-    appendLog(`BROWSER_ASSET name=${selected.key} file=${selected.name} size=${selected.size}`);
-  }
 
   worker = new Worker("./worker.js", { type: "module" });
   refs.startBtn.disabled = true;
@@ -317,19 +340,19 @@ async function runWithAssets(selectedAssets, runMode) {
   refs.stopBtn.disabled = false;
 
   worker.onmessage = (event) => {
-    const { type, line, result, base64 } = event.data || {};
-    if (type === "log") {
-      appendLog(line);
-    } else if (type === "eeprom") {
+    const { type, result, base64, message } = event.data || {};
+    if (type === "eeprom") {
       savePersistedEeprom(base64);
+    } else if (type === "error") {
+      appendLog(`Error: ${message || "unknown worker error"}`);
     } else if (type === "done") {
-      appendLog(`BROWSER_BOOT_RESULT result=${result || "done"}`);
+      appendLog(`Run finished: ${result || "done"}`);
       stopWorker(false);
     }
   };
 
   worker.onerror = (event) => {
-    appendLog(`BROWSER_BOOT_RESULT result=fail reason=worker-error message=${event.message}`);
+    appendLog(`Error: ${event.message}`);
     stopWorker(false);
   };
 
@@ -338,9 +361,8 @@ async function runWithAssets(selectedAssets, runMode) {
     if (!worker) {
       return;
     }
-    appendLog(`BOOT_SMOKE_RESULT reason=browser-main-timeout elapsed_ms=${Date.now() - startedAt} exit=124`);
     stopWorker(false);
-    appendLog("BROWSER_BOOT_RESULT result=timeout");
+    appendLog(`Run timed out after ${Date.now() - startedAt} ms.`);
   }, timeoutMs);
 
   worker.postMessage({
@@ -352,42 +374,56 @@ async function runWithAssets(selectedAssets, runMode) {
 }
 
 async function startRun() {
-  if (!validateAssets()) {
-    appendLog("BROWSER_BOOT_RESULT result=fail reason=invalid-assets");
-    return;
-  }
-
-  const selectedAssets = [];
-  for (const asset of assets) {
-    const selected = await fileToTransfer(asset);
-    if (selected) {
-      selectedAssets.push(selected);
+  try {
+    await loadLocalAssetManifest();
+    if (!validateAssets()) {
+      appendLog("Invalid assets.");
+      return;
     }
+
+    const selectedAssets = [];
+    for (const asset of assets) {
+      const selected = await assetToTransfer(asset);
+      if (selected) {
+        selectedAssets.push(selected);
+      }
+    }
+    if (!selectedAssets.some((asset) => asset.key === "eeprom")) {
+      const persistedEeprom = loadPersistedEepromAsset();
+      if (persistedEeprom) {
+        selectedAssets.push(persistedEeprom);
+      }
+    }
+
+    await runWithAssets(selectedAssets, "selected-assets");
+  } catch (error) {
+    appendLog(`Error: ${error.message || String(error)}`);
+    validateAssets();
   }
-  if (!selectedAssets.some((asset) => asset.key === "eeprom")) {
+}
+
+async function startSyntheticRun() {
+  try {
+    await loadLocalAssetManifest();
+    const flashBytes = 1024 * 1024;
+    const localFlash = await localAssetToTransfer(assets.find((asset) => asset.key === "flash"));
+    const selectedAssets = [localFlash || {
+      key: "flash",
+      name: "synthetic-zero-flash.bin",
+      size: flashBytes,
+      source: "synthetic",
+      buffer: new ArrayBuffer(flashBytes),
+    }];
     const persistedEeprom = loadPersistedEepromAsset();
     if (persistedEeprom) {
       selectedAssets.push(persistedEeprom);
     }
+
+    await runWithAssets(selectedAssets, "synthetic-zero-flash");
+  } catch (error) {
+    appendLog(`Error: ${error.message || String(error)}`);
+    validateAssets();
   }
-
-  await runWithAssets(selectedAssets, "selected-assets");
-}
-
-async function startSyntheticRun() {
-  const flashBytes = 1024 * 1024;
-  const selectedAssets = [{
-    key: "flash",
-    name: "synthetic-zero-flash.bin",
-    size: flashBytes,
-    buffer: new ArrayBuffer(flashBytes),
-  }];
-  const persistedEeprom = loadPersistedEepromAsset();
-  if (persistedEeprom) {
-    selectedAssets.push(persistedEeprom);
-  }
-
-  await runWithAssets(selectedAssets, "synthetic-zero-flash");
 }
 
 function stopWorker(report = true) {
@@ -402,7 +438,7 @@ function stopWorker(report = true) {
   refs.stopBtn.disabled = true;
   validateAssets();
   if (report) {
-    appendLog("BROWSER_BOOT_RESULT result=stopped");
+    appendLog("Run stopped.");
   }
 }
 
@@ -432,7 +468,7 @@ refs.stopBtn.addEventListener("click", () => stopWorker(true));
 refs.downloadBtn.addEventListener("click", downloadTranscript);
 refs.captureDisplayBtn.addEventListener("click", () => {
   captureSyntheticDisplayEvidence().catch((error) => {
-    appendLog(`BROWSER_DISPLAY_CAPTURE result=fail reason=${JSON.stringify(error.message)}`);
+    appendLog(`Error: ${error.message}`);
   });
 });
 
@@ -441,3 +477,4 @@ renderCapabilities();
 drawSyntheticFramebuffer();
 globalThis.xemuBrowserDisplayCapture = captureSyntheticDisplayEvidence;
 validateAssets();
+loadLocalAssetManifest();

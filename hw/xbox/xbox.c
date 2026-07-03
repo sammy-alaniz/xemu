@@ -62,13 +62,9 @@
 
 static bool xbox_boot_trace_enabled(void)
 {
-#ifdef CONFIG_XEMU_BROWSER_BOOT
-    return true;
-#else
     const char *value = getenv("XEMU_BOOT_TRACE");
 
     return value && value[0] && strcmp(value, "0");
-#endif
 }
 
 static void xbox_boot_mark(const char *fmt, ...)

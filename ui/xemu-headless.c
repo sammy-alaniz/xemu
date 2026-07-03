@@ -25,13 +25,9 @@ static int64_t headless_boot_timeout_override_ms = -1;
 
 static bool xemu_boot_trace_enabled(void)
 {
-#ifdef CONFIG_XEMU_BROWSER_BOOT
-    return true;
-#else
     const char *value = getenv("XEMU_BOOT_TRACE");
 
     return value && value[0] && strcmp(value, "0");
-#endif
 }
 
 static void xemu_boot_trace_mark(const char *message)
@@ -164,10 +160,12 @@ int main(int argc, char **argv)
     }
 
     qemu_thread_join(&thread);
-    fprintf(stderr,
-            "BOOT_SMOKE_RESULT reason=%s elapsed_ms=%lld exit=%d\n",
-            reason,
-            (long long)((g_get_monotonic_time() - start_us) / 1000),
-            exit_status);
+    if (xemu_boot_trace_enabled()) {
+        fprintf(stderr,
+                "BOOT_SMOKE_RESULT reason=%s elapsed_ms=%lld exit=%d\n",
+                reason,
+                (long long)((g_get_monotonic_time() - start_us) / 1000),
+                exit_status);
+    }
     return exit_status;
 }
